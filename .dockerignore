@@ -1,0 +1,7 @@
+node_modules
+client
+server
+.git
+.env
+frontend/.next
+frontend/node_modules

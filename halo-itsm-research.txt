@@ -1,0 +1,839 @@
+SVC SERVICEFLOW
+HALOITSM ALIGNMENT RESEARCH
+
+Prepared: 2026-10-21
+Product: SVC ServiceFlow
+Tagline: Request to Resolution
+
+======================================================================
+1. SCOPE AND IMPORTANT LIMITATIONS
+======================================================================
+
+This research compares the current SVC ServiceFlow implementation with
+publicly available HaloITSM product and capability information.
+
+HaloITSM public materials describe product capabilities, but they do not
+provide complete tenant-level technical specifications. The following
+details require private Halo tenant documentation, configuration exports,
+or vendor confirmation:
+
+- Exact role and permission matrices
+- Sub-administrator scope boundaries
+- Field-level security
+- Workflow state and transition schemas
+- Approval and escalation semantics
+- SLA calendar, pause, and breach formulas
+- Service catalog data model and request variables
+- CMDB schema and relationship types
+- Automation API contracts, retries, and rate limits
+- Reporting query model and row-level security
+- Backup, restore, data residency, and release procedures
+- Differences between HaloITSM, HaloPSA, HaloCRM, and newer Halo products
+
+This document is an alignment reference, not a claim that SVC ServiceFlow
+is affiliated with or identical to HaloITSM. SVC ServiceFlow should follow
+comparable ITIL-oriented practices using original implementation, code,
+branding, and assets.
+
+======================================================================
+2. PUBLIC HALOITSM SOURCES REVIEWED
+======================================================================
+
+Product overview:
+https://www.haloitsm.com/
+
+IT service management:
+https://www.usehalo.com/it-service-management
+
+Service management:
+https://www.usehalo.com/platform/service-management
+
+Incident management:
+https://www.usehalo.com/platform/incident-management
+
+Change management:
+https://www.usehalo.com/platform/change-management
+
+Problem management:
+https://www.usehalo.com/platform/problem-management
+
+Major incident management:
+https://www.usehalo.com/platform/major-incident-management
+
+Knowledge management:
+https://www.usehalo.com/platform/knowledge-management
+
+Asset management and CMDB:
+https://www.usehalo.com/platform/asset-management-cmdb
+
+Customer SLA management:
+https://www.usehalo.com/platform/customer-sla-management
+
+Reporting and analytics:
+https://www.usehalo.com/platform/reporting-analytics
+
+Documentation portal:
+https://docs.halopsa.com/
+
+Integrations:
+https://www.usehalo.com/integrations
+
+Pricing and licensing:
+https://www.usehalo.com/pricing
+
+======================================================================
+3. HALOITSM PUBLIC CAPABILITY INVENTORY
+======================================================================
+
+3.1 Core ITSM and ITIL processes
+
+Public Halo materials describe an all-inclusive, ITIL-aligned platform
+covering:
+
+- Incident management
+- Service requests
+- Change management
+- Problem management
+- Knowledge management
+- Service-level management
+- Asset management
+- Configuration management database (CMDB)
+- Automation
+- Reporting and analytics
+
+The public material establishes supported process areas, but does not
+prove that every tenant is configured with identical ITIL states or
+approval paths.
+
+3.2 Incident and major-incident management
+
+Publicly described incident capabilities include:
+
+- Intake
+- Triage
+- Routing
+- Categorization
+- Prioritization
+- Escalation
+- Resolution
+- Closure
+- SLA tracking
+- Dashboards
+- Audit history
+- Problem-management links
+
+Publicly described intake channels include:
+
+- Email
+- Self-service portal
+- Microsoft Teams
+- Phone logging
+- APIs
+- Monitoring alerts
+
+Major-incident capabilities described publicly include:
+
+- Declaring major incidents
+- Staged stakeholder notifications
+- Configurable recipient lists
+- Email, SMS, and Teams communication
+- Review task creation
+- Linked problem investigations
+- Corrective actions
+- Lessons-learned records
+- Major-incident reporting
+
+AI-based major-incident detection is also described publicly, but its
+thresholds, false-positive handling, governance, and availability by
+edition are not documented in detail.
+
+3.3 Service catalog and request fulfillment
+
+Public materials describe:
+
+- Branded self-service portals
+- Customizable service catalogs
+- Request submission
+- Issue reporting
+- Ticket-status viewing
+- Knowledge browsing
+- AI suggestions
+- Department or user-group-specific portal configurations
+- Approval paths
+- Automated fulfillment
+- Runbook and PowerShell automation integrations
+
+Public materials do not specify the complete catalog item schema,
+variable types, fulfillment task model, approval escalation behavior,
+entitlement rules, or catalog reporting model.
+
+3.4 Change management
+
+Publicly described change capabilities include:
+
+- Tracking and planning changes
+- Standardized change control
+- Requestor information
+- CAB review
+- Approval
+- Risk and impact analysis
+- CMDB impact analysis
+- Links between changes and affected services, applications, and users
+- GitHub commit linking
+- Change relationships from problem records
+
+Public materials do not fully document:
+
+- Standard, normal, and emergency change schemas
+- CAB membership rules
+- Risk scoring formulas
+- Backout-plan requirements
+- Conflict detection
+- Deployment verification
+- Approval routing
+
+3.5 Problem management
+
+Publicly described problem capabilities include:
+
+- Linking incidents to problems
+- Raising problems from incidents
+- Root-cause investigation
+- Known errors
+- Workarounds
+- Trend analysis
+- Repeated incident analysis
+- Asset failure analysis
+- Permanent fixes
+- Creating related changes from problems
+- Updating or closing linked incidents
+- Problem audit history
+- Lessons learned
+
+3.6 SLA and OLA management
+
+Publicly described service-level capabilities include:
+
+- Multiple SLA policies
+- OLA support
+- SLA combinations based on ticket type, priority, customer group, or team
+- Real-time target tracking
+- Warning notifications
+- Breach escalation
+- SLA dashboards
+- Scheduled SLA reporting
+- Regional and multi-site SLA frameworks
+
+Public materials do not document:
+
+- Business-hour calculations
+- Holiday calendars
+- Pause and resume conditions
+- First-response versus resolution clocks
+- OLA inheritance
+- Breach-action formulas
+- Priority recalculation
+- Retroactive SLA changes
+
+3.7 Automation, orchestration, and AI
+
+Publicly described automation capabilities include:
+
+- Configurable workflows
+- Forms and fields
+- Rules
+- Portals
+- Automations
+- Runbooks
+- External automation
+- Monitoring-driven ticket creation
+- AI-assisted triage
+- Categorization
+- Summarization
+- Sentiment analysis
+- Suggested replies
+- Knowledge recommendations
+- SLA-risk alerts
+- API-driven external automation
+
+AI-related public claims are product-positioning statements unless
+supported by tenant documentation. Model versions, retention, prompt
+controls, data handling, human approval safeguards, and rate limits are
+not fully documented publicly.
+
+3.8 Assets and CMDB
+
+Publicly described asset and CMDB capabilities include:
+
+- End-user asset inventory
+- Configuration items
+- Automated discovery integrations
+- Real-time asset updates
+- Multi-site and location tracking
+- Lifecycle states
+- Asset type and status reporting
+- Dependency visualization
+- Impact analysis
+- Linking assets to incidents, changes, and problems
+- Contracts and supplier records
+- Renewal and expiry alerts
+- Software agreements
+- Maintenance contracts
+
+Public materials do not specify:
+
+- CI classes and attributes
+- Relationship types
+- Reconciliation rules
+- Discovery schedules
+- Import mappings
+- CMDB governance
+- Asset and CI limits
+
+3.9 Knowledge management
+
+Publicly described knowledge capabilities include:
+
+- Knowledge articles
+- Natural-language search
+- Contextual suggestions
+- Pre-submission suggestions
+- Knowledge-gap analysis
+- Article ownership
+- Review and expiry dates
+- Ratings and feedback
+- Approval workflows
+- Department-specific permissions
+- Separate knowledge bases
+- Linking articles to tickets and problems
+- Recording article usage in resolutions
+- Converting problem resolutions into articles
+- Deflection-rate reporting
+
+3.10 Reporting and analytics
+
+Publicly described reporting capabilities include:
+
+- Real-time dashboards
+- SLA reports
+- Workload reports
+- Agent activity
+- Ticket ownership analysis
+- Asset lifecycle reporting
+- Charts and tables
+- Time tracking
+- Calculations
+- Flexible report layouts
+- Scheduled reporting
+
+Public materials do not specify:
+
+- Report-builder permission rules
+- Query language or data model
+- Export formats
+- Row-level security
+- Retention periods
+- Scheduled-delivery limits
+- Dashboard performance constraints
+
+3.11 Integrations and channels
+
+Official public pages provide evidence for integrations including:
+
+- Microsoft Teams
+- Azure Automation
+- Azure Active Directory / Microsoft Entra ID
+- Okta
+- Google Workspace
+- Confluence
+- GitHub
+- AWS and Azure services
+- Monitoring platforms
+- RMM tools
+- Telephony
+- Security tools
+- Collaboration platforms
+
+Concrete public integration examples include:
+
+- Teams ticket search and ticket creation
+- Teams ticket updates and bot commands
+- Azure runbook and PowerShell execution
+- Directory synchronization
+- User inactivation
+- Portal authentication
+- Confluence article import
+- GitHub commit-to-change linking
+
+Authentication scopes, webhook retries, polling behavior, supported
+versions, data residency, and failure handling are not consistently
+documented publicly.
+
+3.12 Roles, permissions, and licensing
+
+Public Halo material uses terminology including:
+
+- Agents
+- End users
+- Portal customers
+- Teams
+- Sites
+- User groups
+- Sub-administrators
+- Federated administration
+
+Public materials describe:
+
+- Role-based access control
+- Department and regional administration
+- Separate portal configurations
+- Department-specific knowledge permissions
+- Named agent licensing
+- Concurrent agent licensing
+
+The actual role matrix and privilege inheritance rules are not publicly
+available.
+
+3.13 Administration, configuration, and deployment
+
+Public Halo materials emphasize configuration over custom code, including:
+
+- Workflows
+- Forms
+- Fields
+- Portals
+- Rules
+- Automations
+- Reports
+- Integrations
+
+Public pricing claims describe all-inclusive feature and integration
+availability, but licensing and contract terms should be verified against
+the actual order form or tenant.
+
+======================================================================
+4. CURRENT SVC SERVICEFLOW CAPABILITIES
+======================================================================
+
+The current SVC ServiceFlow production rebuild includes:
+
+- FastAPI backend
+- Async SQLAlchemy
+- Alembic migrations
+- PostgreSQL
+- Redis
+- Celery worker
+- Celery Beat
+- Next.js frontend
+- MailHog local email inspection
+- JWT authentication
+- Refresh-token rotation
+- Logout and token revocation
+- Login throttling
+- Administrator, technician, and requester roles
+- Entity-scoped access
+- Ticket creation and updates
+- Ticket status and priority
+- Urgency and impact
+- Categories
+- Groups and actors
+- Public replies
+- Private technician notes
+- Tasks
+- Solutions
+- Solution approval
+- Attachments
+- Secure document downloads
+- Attachment magic-byte validation
+- Ticket links
+- Activity timeline
+- SLA deadlines
+- SLA escalation records
+- Business rules
+- Recurring tickets
+- Notification templates
+- SMTP/MailHog delivery
+- Background SLA checks
+- Soft-deleted tickets
+- Audit log foundation
+- Security headers
+- Responsive ticket workspace
+- Responsive login
+- SVC branding
+- Docker development stack
+
+======================================================================
+5. SVC SERVICEFLOW GAPS AGAINST HALOITSM-STYLE COVERAGE
+======================================================================
+
+5.1 Service catalog and request fulfillment
+
+Current state:
+
+- General ticket creation exists.
+- A full catalog item and fulfillment model is not yet implemented.
+
+Needed:
+
+- Service catalog items
+- Custom request fields
+- Catalog-specific forms
+- Department and user-group visibility
+- Approval paths
+- Fulfillment tasks
+- Request templates
+- Catalog analytics
+- Optional runbook integrations
+
+Priority: HIGH
+
+5.2 Problem management
+
+Current state:
+
+- Ticket links and solutions exist.
+- A dedicated problem lifecycle does not yet exist.
+
+Needed:
+
+- Problem records
+- Root cause
+- Workaround
+- Known-error state
+- Linked incidents
+- Problem tasks
+- Problem-to-change relationship
+- Problem closure workflow
+- Trend reporting
+
+Priority: HIGH
+
+5.3 Change management
+
+Current state:
+
+- No complete change-management module is currently exposed.
+
+Needed:
+
+- Change records
+- Change types
+- Risk and impact scoring
+- Approval workflow
+- CAB membership
+- Planned start and end times
+- Implementation plan
+- Backout plan
+- Change tasks
+- Change calendar
+- Links to assets, services, problems, and tickets
+- Post-implementation review
+
+Priority: HIGH
+
+5.4 Major-incident management
+
+Current state:
+
+- Standard ticket workflows exist.
+- A dedicated major-incident process is not implemented.
+
+Needed:
+
+- Major-incident record and flag
+- Incident commander
+- Stakeholder groups
+- Communication templates
+- Incident bridge log
+- Timeline milestones
+- Post-incident review
+- Lessons learned
+- Major-incident dashboards
+
+Priority: MEDIUM/HIGH
+
+5.5 Asset management and CMDB
+
+Current state:
+
+- No complete asset or CMDB module is currently implemented.
+
+Needed:
+
+- Assets
+- Configuration items
+- Asset types
+- Lifecycle states
+- Locations
+- Departments
+- Ownership
+- Contracts
+- Renewal dates
+- CI relationships
+- Dependency visualization
+- Incident, problem, and change relationships
+- Import and discovery integrations
+- Asset reports
+
+Priority: HIGH
+
+5.6 Knowledge management
+
+Current state:
+
+- A complete knowledge-base workflow is not currently exposed.
+
+Needed:
+
+- Article records
+- Article categories
+- Draft, review, published, and retired states
+- Approval workflow
+- Ownership
+- Review dates
+- Ratings
+- Search
+- Suggested articles during ticket creation
+- Convert resolved tickets to articles
+- Usage analytics
+- Department visibility
+
+Priority: HIGH
+
+5.7 SLA and OLA maturity
+
+Current state:
+
+- SLA models and deadline assignment exist.
+- Business calendar and OLA behavior are incomplete.
+
+Needed:
+
+- Business hours
+- Holidays
+- Working calendars
+- First-response targets
+- Resolution targets
+- Pause conditions
+- OLA inheritance
+- Warning thresholds
+- Breach actions
+- Regional/site calendars
+- SLA recalculation rules
+- SLA reporting formulas
+
+Priority: HIGH
+
+5.8 Automation and orchestration
+
+Current state:
+
+- Business rules, recurring tickets, Celery tasks, and notifications exist.
+
+Needed:
+
+- Visual workflow editor
+- Rule versioning
+- Rule testing
+- Retry and failure handling
+- Webhooks
+- Runbook execution
+- Monitoring event intake
+- Automation audit history
+- Human approval for high-risk actions
+- AI governance controls
+
+Priority: MEDIUM/HIGH
+
+5.9 Portal and intake channels
+
+Current state:
+
+- Main web workspace exists.
+- Email and MailHog foundations exist.
+
+Needed:
+
+- Requester-specific portal
+- Technician workspace
+- Administrator workspace
+- Service catalog portal
+- IMAP mail collector
+- Email replies
+- Microsoft Teams
+- Monitoring/webhook intake
+- Portal configuration by group
+
+Priority: HIGH
+
+5.10 Reporting and analytics
+
+Current state:
+
+- Basic dashboard and ticket metrics exist.
+
+Needed:
+
+- Dashboard API
+- Role-scoped KPIs
+- Volume trends
+- First-response time
+- Resolution time
+- SLA compliance
+- Technician workload
+- Backlog aging
+- Reopen rate
+- Customer satisfaction
+- Asset lifecycle reports
+- Problem trends
+- Change success and failure
+- Scheduled delivery
+- CSV/PDF export
+
+Priority: HIGH
+
+5.11 Roles and delegated administration
+
+Current state:
+
+- Administrator, technician, and requester roles exist.
+- Basic entity scoping exists.
+
+Needed:
+
+- Supervisor or team-lead role
+- Site and department scope
+- Sub-administrator role
+- Permission policies instead of profile-name checks
+- Field-level permissions
+- CAB permissions
+- Knowledge permissions
+- Catalog permissions
+- Delegated administration
+- Agent account states and licensing concepts
+
+Priority: HIGH
+
+5.12 Integrations
+
+Recommended initial integrations:
+
+1. Microsoft Entra ID / Azure AD
+2. SMTP and IMAP
+3. Microsoft Teams
+4. Webhooks
+5. GitHub change linking
+6. Monitoring alerts
+7. Knowledge import
+
+Priority: MEDIUM
+
+======================================================================
+6. RECOMMENDED IMPLEMENTATION ROADMAP
+======================================================================
+
+Phase 1: ITIL foundation
+
+- Formal incident and request distinction
+- Problem management
+- Change management
+- Major incidents
+- Approval engine
+- Better state transitions
+- Business calendars
+- SLA and OLA rules
+
+Phase 2: Service experience
+
+- Service catalog
+- Request templates
+- Custom fields
+- Approval paths
+- Requester portal
+- Technician workspace
+- Knowledge base
+
+Phase 3: CMDB and assets
+
+- Asset model
+- Configuration items
+- Locations
+- Contracts
+- Dependencies
+- Relationship mapping
+- Asset discovery and import
+
+Phase 4: Reporting and governance
+
+- Dashboard statistics API
+- SLA analytics
+- Workload analytics
+- Problem and change reports
+- Scheduled reports
+- CSV/PDF exports
+- Delegated administration
+- Fine-grained permission policies
+
+Phase 5: Integrations and automation
+
+- IMAP collector
+- Microsoft Teams
+- Entra ID / Okta
+- Webhooks
+- Monitoring intake
+- Runbooks
+- Visual workflow builder
+- Controlled AI assistance
+
+======================================================================
+7. RECOMMENDED PRIORITY ORDER
+======================================================================
+
+The most valuable next implementation sequence is:
+
+1. Problem management
+2. Change management
+3. Service catalog and request fulfillment
+4. Knowledge management
+5. Asset and CMDB foundation
+6. Business calendars and mature SLA/OLA behavior
+7. Major-incident management
+8. Dashboard and reporting APIs
+9. Fine-grained permissions and delegated administration
+10. Integrations and controlled automation
+
+Deterministic workflows, authorization, auditability, and data integrity
+should be completed before introducing AI-assisted operations.
+
+======================================================================
+8. FINAL CONCLUSION
+======================================================================
+
+SVC ServiceFlow is currently a strong ticketing and automation foundation,
+but it is not yet HaloITSM-equivalent.
+
+The largest capability gaps are:
+
+1. Service catalog and request fulfillment
+2. Problem management
+3. Change management
+4. Asset and CMDB management
+5. Knowledge management
+6. Mature SLA and OLA calendars
+7. Major-incident management
+8. Configurable reporting
+9. Delegated administration and fine-grained permissions
+10. Integrations and email collection
+
+The product should become HaloITSM-aligned by implementing comparable
+ITIL processes and operational controls while retaining:
+
+- SVC ServiceFlow product identity
+- SVC Infosystems branding
+- Original source code
+- Original UI implementation
+- Original assets
+- Independent data model and architecture
+
+Do not copy HaloITSM source code, proprietary assets, text, interface
+designs, or implementation details.

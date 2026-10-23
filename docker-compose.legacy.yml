@@ -1,0 +1,15 @@
+services:
+  service-desk:
+    build: .
+    ports:
+      - "4000:4000"
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      JWT_SECRET: ${JWT_SECRET}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD}
+    volumes:
+      - svc-data:/app/server/data
+    restart: unless-stopped
+volumes:
+  svc-data:
