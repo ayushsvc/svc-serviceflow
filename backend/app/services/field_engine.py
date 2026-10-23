@@ -106,6 +106,22 @@ async def get_type_fields(db: AsyncSession, ticket_type_id: int, entity_id: int)
     return ticket_type, list(rows)
 
 
+async def sanitize_field_values(
+    db: AsyncSession,
+    ticket_type_id: int,
+    entity_id: int,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    _, fields = await get_type_fields(db, ticket_type_id, entity_id)
+    definitions = {definition.key: definition for definition, _ in fields}
+    sanitized = dict(values)
+    for key, value in sanitized.items():
+        definition = definitions.get(key)
+        if definition and definition.type in {"richtext", "textarea"} and isinstance(value, str):
+            sanitized[key] = sanitize_rich_text(value)
+    return sanitized
+
+
 async def validate_custom_fields(
     db: AsyncSession,
     ticket_type_id: int,
@@ -113,29 +129,31 @@ async def validate_custom_fields(
     role: str,
     values: dict[str, Any],
     existing: dict[str, Any] | None = None,
+    trusted_values: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     _, fields = await get_type_fields(db, ticket_type_id, entity_id)
     definitions = {definition.key: (definition, mapping) for definition, mapping in fields}
     unknown = set(values) - set(definitions)
     if unknown:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Unknown ticket fields: {', '.join(sorted(unknown))}")
-    merged = {**(existing or {}), **values}
+    derived_values = {key: value for key, value in (trusted_values or {}).items() if key in definitions}
+    merged = {**(existing or {}), **values, **derived_values}
     for key, (definition, mapping) in definitions.items():
         active = _matches_condition(merged, mapping.show_condition)
         if not active and key in values:
             raise HTTPException(status_code=422, detail=f"Field '{key}' is not available for the selected values")
         if active and mapping.required and merged.get(key) in (None, "", []):
             raise HTTPException(status_code=422, detail=f"Field '{key}' is required")
-        if key in values:
+        if key in values or key in derived_values:
             if role not in mapping.editable_by_roles:
+                if key in derived_values:
+                    continue
                 raise HTTPException(status_code=403, detail=f"Field '{key}' is not editable by your role")
+            if key in derived_values:
+                continue
             if active and not _valid_value(definition, values[key]):
                 raise HTTPException(status_code=422, detail=f"Invalid value for field '{key}'")
-    for key, value in list(merged.items()):
-        definition_mapping = definitions.get(key)
-        if definition_mapping and definition_mapping[0].type == "richtext" and isinstance(value, str):
-            merged[key] = sanitize_rich_text(value)
-    return merged
+    return await sanitize_field_values(db, ticket_type_id, entity_id, merged)
 
 
 async def store_field_values(db: AsyncSession, ticket: Ticket, values: dict[str, Any]) -> None:

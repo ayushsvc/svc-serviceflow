@@ -4,6 +4,7 @@ from sqlalchemy import select
 from app.deps import CurrentUser, DbSession, require_admin
 from app.models import BusinessRule, NotificationTemplate, RecurringTicket, SLA, User
 from app.schemas_automation import NotificationTemplateCreate, NotificationTemplateRead, RecurringTicketCreate, RecurringTicketRead, RuleCreate, RuleRead, SLACreate, SLARead
+from app.services.content import sanitize_rich_text
 
 router = APIRouter(tags=["automation"])
 
@@ -46,7 +47,9 @@ async def list_notification_templates(user: CurrentUser, db: DbSession) -> list[
 @router.post("/notification-templates", response_model=NotificationTemplateRead, status_code=status.HTTP_201_CREATED)
 async def create_notification_template(payload: NotificationTemplateCreate, user: CurrentUser, db: DbSession) -> NotificationTemplate:
     require_admin(user)
-    template = NotificationTemplate(entity_id=user.entity_id, **payload.model_dump())
+    values = payload.model_dump()
+    values["body_jinja"] = sanitize_rich_text(values["body_jinja"])
+    template = NotificationTemplate(entity_id=user.entity_id, **values)
     db.add(template)
     await db.commit()
     await db.refresh(template)

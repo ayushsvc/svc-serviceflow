@@ -8,7 +8,7 @@ from app.deps import CurrentUser, DbSession, require_admin, require_helpdesk
 from app.models import BusinessRule, Category, CategoryTeam, FieldDefinition, Group, PriorityMatrix, SLA, TicketTypeDefinition, TicketTypeField, TicketTemplate, User
 from app.schemas_field_engine import AssignmentPreview, FieldDefinitionCreate, FieldDefinitionRead, FormField, FormSchemaRead, PriorityMatrixPayload, PriorityMatrixRead, SlaPreview, TemplateCreate, TemplateRead, TicketTypeCreate, TicketTypeRead
 from app.services.audit import record_audit
-from app.services.field_engine import get_type_fields, validate_condition, validate_custom_fields
+from app.services.field_engine import get_type_fields, sanitize_field_values, validate_condition
 from app.services.tickets import calculate_matrix_priority
 
 router = APIRouter(tags=["field-engine"])
@@ -216,7 +216,9 @@ async def create_template(payload: TemplateCreate, user: CurrentUser, db: DbSess
     require_admin(user)
     ticket_type, _ = await get_type_fields(db, payload.ticket_type_id, user.entity_id)
     await _entity_group(db, payload.team_id, user.entity_id)
-    template = TicketTemplate(**payload.model_dump())
+    values = payload.model_dump()
+    values["prefilled"] = await sanitize_field_values(db, payload.ticket_type_id, user.entity_id, values["prefilled"])
+    template = TicketTemplate(**values)
     db.add(template)
     await db.flush()
     await record_audit(db, entity="ticket_template", entity_id=template.id, action="created", actor_id=user.id, diff={"ticket_type_id": ticket_type.id})
@@ -234,6 +236,7 @@ async def update_template(template_id: int, payload: TemplateCreate, user: Curre
     await get_type_fields(db, payload.ticket_type_id, user.entity_id)
     await _entity_group(db, payload.team_id, user.entity_id)
     changes = payload.model_dump()
+    changes["prefilled"] = await sanitize_field_values(db, payload.ticket_type_id, user.entity_id, changes["prefilled"])
     for key, value in changes.items():
         setattr(template, key, value)
     await record_audit(db, entity="ticket_template", entity_id=template.id, action="updated", actor_id=user.id, diff=changes)

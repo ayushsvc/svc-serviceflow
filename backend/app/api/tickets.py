@@ -411,9 +411,11 @@ async def get_ticket(ticket_id: int, user: CurrentUser, db: DbSession) -> Ticket
 @router.post("/tickets", response_model=TicketRead, status_code=status.HTTP_201_CREATED)
 async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession) -> Ticket:
     field_values = dict(payload.custom_fields)
+    trusted_field_values: dict[str, object] = {}
     if user.profile.interface == "self_service":
-        field_values["user"] = user.id
-        field_values["organisation"] = user.entity_id
+        field_values.pop("user", None)
+        field_values.pop("organisation", None)
+        trusted_field_values = {"user": user.id, "organisation": user.entity_id}
     if isinstance(payload.description, str):
         payload.description = sanitize_rich_text(payload.description)
     ticket_type_id = payload.ticket_type_id or await db.scalar(select(TicketTypeDefinition.id).where(
@@ -423,7 +425,14 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
     ))
     if ticket_type_id is None:
         raise HTTPException(status_code=422, detail="A valid ticket type is required")
-    field_values = await validate_custom_fields(db, ticket_type_id, user.entity_id, user.profile.name, field_values)
+    field_values = await validate_custom_fields(
+        db,
+        ticket_type_id,
+        user.entity_id,
+        user.profile.name,
+        field_values,
+        trusted_values=trusted_field_values,
+    )
     if payload.category_id is not None and await db.scalar(select(Category).where(Category.id == payload.category_id, Category.entity_id == user.entity_id)) is None:
         raise HTTPException(status_code=422, detail="Category is outside your entity")
     requested_sla_id = payload.sla_id
@@ -494,9 +503,13 @@ async def update_ticket(ticket_id: int, payload: TicketUpdate, user: CurrentUser
     if "description" in values and isinstance(values["description"], str):
         values["description"] = sanitize_rich_text(values["description"])
     if "ticket_type_id" in values:
-        await validate_custom_fields(db, values["ticket_type_id"], user.entity_id, user.profile.name, values.get("custom_fields", {}))
+        values["custom_fields"] = await validate_custom_fields(
+            db, values["ticket_type_id"], user.entity_id, user.profile.name, values.get("custom_fields", {})
+        )
     elif "custom_fields" in values and ticket.ticket_type_id is not None:
-        await validate_custom_fields(db, ticket.ticket_type_id, user.entity_id, user.profile.name, values["custom_fields"], ticket.custom_fields)
+        values["custom_fields"] = await validate_custom_fields(
+            db, ticket.ticket_type_id, user.entity_id, user.profile.name, values["custom_fields"], ticket.custom_fields
+        )
     if "category_id" in values and values["category_id"] is not None and await db.scalar(select(Category).where(Category.id == values["category_id"], Category.entity_id == user.entity_id)) is None:
         raise HTTPException(status_code=422, detail="Category is outside your entity")
     if "assignee_id" in values and values["assignee_id"] is not None and await db.scalar(select(User).where(User.id == values["assignee_id"], User.entity_id == user.entity_id, User.is_active.is_(True))) is None:
@@ -596,7 +609,9 @@ async def add_followup(ticket_id: int, payload: FollowupCreate, user: CurrentUse
         raise HTTPException(status_code=404, detail="Ticket not found")
     if payload.is_private:
         require_helpdesk(user)
-    followup = TicketFollowup(ticket_id=ticket_id, author_id=user.id, **payload.model_dump())
+    values = payload.model_dump()
+    values["body"] = sanitize_rich_text(values["body"])
+    followup = TicketFollowup(ticket_id=ticket_id, author_id=user.id, **values)
     db.add(followup)
     await db.commit()
     await db.refresh(followup)
@@ -624,7 +639,9 @@ async def create_task(ticket_id: int, payload: TaskCreate, user: CurrentUser, db
     await scoped_ticket(ticket_id, user, db)
     if payload.assignee_id is not None and await db.scalar(select(User).where(User.id == payload.assignee_id, User.entity_id == user.entity_id, User.is_active.is_(True))) is None:
         raise HTTPException(status_code=422, detail="Task assignee is outside your entity")
-    task = TicketTask(ticket_id=ticket_id, **payload.model_dump())
+    values = payload.model_dump()
+    values["body"] = sanitize_rich_text(values["body"])
+    task = TicketTask(ticket_id=ticket_id, **values)
     db.add(task)
     await db.commit()
     await db.refresh(task)
@@ -643,7 +660,9 @@ async def list_solutions(ticket_id: int, user: CurrentUser, db: DbSession) -> li
 async def propose_solution(ticket_id: int, payload: SolutionCreate, user: CurrentUser, db: DbSession) -> TicketSolution:
     require_helpdesk(user)
     await scoped_ticket(ticket_id, user, db)
-    solution = TicketSolution(ticket_id=ticket_id, author_id=user.id, **payload.model_dump())
+    values = payload.model_dump()
+    values["body"] = sanitize_rich_text(values["body"])
+    solution = TicketSolution(ticket_id=ticket_id, author_id=user.id, **values)
     db.add(solution)
     await db.commit()
     await db.refresh(solution)
