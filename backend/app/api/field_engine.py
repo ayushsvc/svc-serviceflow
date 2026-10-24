@@ -118,11 +118,23 @@ async def delete_field_definition(field_id: int, user: CurrentUser, db: DbSessio
 
 @router.get("/ticket-types", response_model=list[TicketTypeRead])
 async def list_ticket_types(user: CurrentUser, db: DbSession) -> list[Any]:
-    require_helpdesk(user)
-    types = list((await db.scalars(select(TicketTypeDefinition).where(
+    query = select(TicketTypeDefinition).where(
         ((TicketTypeDefinition.entity_id == user.entity_id) | (TicketTypeDefinition.entity_id.is_(None))),
-    ).order_by(TicketTypeDefinition.name))).all())
-    return [await _ticket_type_output(db, ticket_type) for ticket_type in types]
+        TicketTypeDefinition.is_active.is_(True),
+    )
+    if user.profile.name == "Requester":
+        query = query.where(TicketTypeDefinition.itil_class.in_(["INCIDENT", "REQUEST"]))
+    types = list((await db.scalars(query.order_by(TicketTypeDefinition.name))).all())
+    results = []
+    for ticket_type in types:
+        result = await _ticket_type_output(db, ticket_type)
+        if user.profile.name == "Requester":
+            result["fields"] = [
+                field for field in result["fields"]
+                if "Requester" in field["visible_to_roles"] and field["show_on_portal"]
+            ]
+        results.append(result)
+    return results
 
 
 @router.post("/ticket-types", response_model=TicketTypeRead, status_code=status.HTTP_201_CREATED)
@@ -192,11 +204,21 @@ async def delete_ticket_type(ticket_type_id: int, user: CurrentUser, db: DbSessi
 @router.get("/ticket-types/{ticket_type_id}/form", response_model=FormSchemaRead)
 async def ticket_type_form(ticket_type_id: int, user: CurrentUser, db: DbSession) -> FormSchemaRead:
     ticket_type, fields = await get_type_fields(db, ticket_type_id, user.entity_id)
+    if user.profile.name == "Requester" and ticket_type.itil_class not in {"INCIDENT", "REQUEST"}:
+        raise HTTPException(status_code=404, detail="Ticket type not found")
     pages: dict[str, list[FormField]] = {}
     for definition, mapping in fields:
+        if user.profile.name not in mapping.visible_to_roles:
+            continue
+        if user.profile.name == "Requester" and not mapping.show_on_portal:
+            continue
+        editable = user.profile.name in mapping.editable_by_roles
+        if definition.key == "sla":
+            rights = user.profile.rights or {}
+            editable = editable and (rights.get("*") is True or rights.get("override_sla") is True)
         pages.setdefault(mapping.page, []).append(FormField(
             key=definition.key, label=definition.label, type=definition.type, options=definition.options or {},
-            validation=definition.validation or {}, required=mapping.required, editable=user.profile.name in mapping.editable_by_roles,
+            validation=definition.validation or {}, required=mapping.required, editable=editable,
             default_value=mapping.default_value, page=mapping.page, show_on_portal=mapping.show_on_portal,
             show_condition=mapping.show_condition or {},
         ))

@@ -64,8 +64,11 @@ def _valid_value(field: FieldDefinition, value: Any) -> bool:
         return False
     if field.type == "number" and (not isinstance(value, int) or isinstance(value, bool)):
         return False
-    if field.type in {"multiselect"} and not isinstance(value, list):
-        return False
+    choices = field.options.get("choices") if field.options else None
+    if field.type == "select":
+        return isinstance(choices, list) and bool(choices) and value in choices
+    if field.type == "multiselect":
+        return isinstance(value, list) and isinstance(choices, list) and bool(choices) and all(item in choices for item in value)
     if field.type == "checkbox" and not isinstance(value, bool):
         return False
     if field.type == "date":
@@ -78,9 +81,6 @@ def _valid_value(field: FieldDefinition, value: Any) -> bool:
             datetime.fromisoformat(str(value))
         except ValueError:
             return False
-    choices = field.options.get("choices") if field.options else None
-    if choices and value not in choices and not (isinstance(value, list) and all(item in choices for item in value)):
-        return False
     validation = field.validation or {}
     if isinstance(value, str) and "max_length" in validation and len(value) > int(validation["max_length"]):
         return False
@@ -145,10 +145,13 @@ async def validate_custom_fields(
         if active and mapping.required and merged.get(key) in (None, "", []):
             raise HTTPException(status_code=422, detail=f"Field '{key}' is required")
         if key in values or key in derived_values:
+            visible = role in mapping.visible_to_roles and (role != "Requester" or mapping.show_on_portal)
+            if not visible and key not in derived_values:
+                raise HTTPException(status_code=422, detail=f"Field '{key}' is not visible to your role")
             if role not in mapping.editable_by_roles:
                 if key in derived_values:
                     continue
-                raise HTTPException(status_code=403, detail=f"Field '{key}' is not editable by your role")
+                raise HTTPException(status_code=422, detail=f"Field '{key}' is not editable by your role")
             if key in derived_values:
                 continue
             if active and not _valid_value(definition, values[key]):

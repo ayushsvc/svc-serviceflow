@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import audit, auth, automation, entities, field_engine, tickets
+from app.api import audit, auth, automation, entities, field_engine, tickets, workflows
 from app.core.config import get_settings
 
 
@@ -36,6 +36,7 @@ app.include_router(field_engine.router, prefix="/api/v1")
 app.include_router(tickets.router, prefix="/api/v1")
 app.include_router(automation.router, prefix="/api/v1")
 app.include_router(audit.router, prefix="/api/v1")
+app.include_router(workflows.router, prefix="/api/v1")
 
 
 @app.get("/health")

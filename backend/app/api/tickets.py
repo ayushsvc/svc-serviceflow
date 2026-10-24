@@ -5,10 +5,11 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from pathlib import Path
 from uuid import uuid4
-from sqlalchemy import String, and_, desc, func, or_, select, update
+from sqlalchemy import String, and_, desc, false, func, or_, select, true, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.elements import ColumnElement
 from app.deps import CurrentUser, DbSession, require_admin, require_helpdesk
-from app.models import BusinessRule, Category, Group, ListProfile, PriorityMatrix, SLA, Ticket, TicketActor, TicketDocument, TicketFollowup, TicketLink, TicketSolution, TicketTask, TicketTypeDefinition, User
+from app.models import AuditLog, BusinessRule, Category, Entity, Group, GroupMember, ListProfile, PriorityMatrix, SLA, Ticket, TicketActor, TicketDocument, TicketFollowup, TicketLink, TicketSolution, TicketTask, TicketTypeDefinition, TicketWorkflow, User, WorkflowApproval
 from app.schemas_tickets import ActorCreate, ActorRead, CategoryCreate, CategoryRead, FollowupCreate, FollowupRead, GroupRead, LinkCreate, LinkRead, ListProfileCreate, ListProfileRead, ListProfileUpdate, RequesterRead, SolutionCreate, SolutionRead, TaskCreate, TaskRead, TicketCreate, TicketListResponse, TicketRead, TicketUpdate
 from app.services.automation import calculate_sla_deadlines, conditions_match
 from app.services.tickets import calculate_priority, transition_status
@@ -24,6 +25,75 @@ PROFILE_FILTER_KEYS = {"search", "status", "priority", "sort", "direction", "pag
 PROFILE_SORT_FIELDS = {"id", "opened_at", "priority", "status", "title"}
 PROFILE_COLUMNS = {"id", "title", "status", "priority", "opened_at", "requester_name", "requester_active", "requester_vip", "flagged", "assignee_id", "ttr_due_at"}
 PROFILE_STATUSES = {"NEW", "ASSIGNED", "PLANNED", "PENDING", "SOLVED", "CLOSED"}
+
+
+def has_profile_right(user: User, right: str) -> bool:
+    rights = getattr(user.profile, "rights", None) or {}
+    return rights.get("*") is True or rights.get(right) is True
+
+
+def ticket_route_team_id():
+    assigned_group = (
+        select(TicketActor.actor_id)
+        .where(
+            TicketActor.ticket_id == Ticket.id,
+            TicketActor.actor_type == "GROUP",
+            TicketActor.role == "ASSIGNEE",
+        )
+        .order_by(TicketActor.id)
+        .limit(1)
+        .correlate(Ticket)
+        .scalar_subquery()
+    )
+    ticket_type_group = (
+        select(func.coalesce(TicketTypeDefinition.default_team_id, TicketTypeDefinition.group_id))
+        .where(TicketTypeDefinition.id == Ticket.ticket_type_id)
+        .correlate(Ticket)
+        .scalar_subquery()
+    )
+    return func.coalesce(assigned_group, ticket_type_group)
+
+
+def ticket_visibility_scope(user: User, queue: str | None = None) -> ColumnElement[bool]:
+    if has_profile_right(user, "ticket:view_all"):
+        return true()
+    if has_profile_right(user, "ticket:own_only"):
+        return Ticket.requester_id == user.id
+    if not has_profile_right(user, "ticket:view_queue"):
+        return false()
+
+    user_group_ids = (
+        select(GroupMember.group_id)
+        .join(Group, Group.id == GroupMember.group_id)
+        .where(GroupMember.user_id == user.id, Group.entity_id == user.entity_id)
+        .correlate(None)
+    )
+    route_team_id = ticket_route_team_id()
+    assigned_to_team = route_team_id.in_(user_group_ids)
+    assigned_to_user = Ticket.assignee_id == user.id
+    unassigned = and_(Ticket.assignee_id.is_(None), route_team_id.is_(None))
+    if queue == "mine":
+        return and_(assigned_to_user, or_(route_team_id.is_(None), assigned_to_team))
+    if queue == "teams":
+        return assigned_to_team
+    if queue == "unassigned":
+        return unassigned
+    return or_(
+        and_(assigned_to_user, or_(route_team_id.is_(None), assigned_to_team)),
+        assigned_to_team,
+        unassigned,
+    )
+
+
+async def get_scoped_ticket(ticket_id: int, user: User, db: DbSession) -> Ticket | None:
+    return await db.scalar(
+        select(Ticket).where(
+            Ticket.id == ticket_id,
+            Ticket.entity_id == user.entity_id,
+            Ticket.deleted_at.is_(None),
+            ticket_visibility_scope(user),
+        )
+    )
 
 
 def escape_ticket_search(value: str) -> str:
@@ -179,6 +249,7 @@ async def list_tickets(
     direction: str = Query(default="desc", pattern="^(asc|desc)$"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
+    queue: str | None = Query(default=None, pattern="^(mine|teams|unassigned)$"),
 ) -> dict:
     sort_columns = {
         "id": Ticket.id,
@@ -189,9 +260,10 @@ async def list_tickets(
     }
     if sort not in sort_columns:
         raise HTTPException(status_code=422, detail="Unsupported ticket sort")
+    if queue is not None and not has_profile_right(user, "ticket:view_queue"):
+        raise HTTPException(status_code=403, detail="Ticket queue access required")
     conditions = [Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None)]
-    if user.profile.interface == "self_service":
-        conditions.append(Ticket.requester_id == user.id)
+    conditions.append(ticket_visibility_scope(user, queue))
     if ticket_status:
         conditions.append(Ticket.status == ticket_status)
     if priority is not None:
@@ -230,29 +302,53 @@ async def list_tickets(
 
 @router.get("/tickets/team-counts")
 async def ticket_team_counts(user: CurrentUser, db: DbSession) -> list[dict[str, int | str | None]]:
-    conditions = [Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None)]
-    if user.profile.interface == "self_service":
-        conditions.append(Ticket.requester_id == user.id)
+    conditions = [Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None), ticket_visibility_scope(user)]
+    route_team_id = ticket_route_team_id()
     rows = await db.execute(
-        select(Group.id, func.count(Ticket.id))
-        .outerjoin(
-            TicketTypeDefinition,
-            and_(
-                TicketTypeDefinition.id == Ticket.ticket_type_id,
-                or_(TicketTypeDefinition.entity_id.is_(None), TicketTypeDefinition.entity_id == user.entity_id),
-            ),
-        )
-        .outerjoin(
-            Group,
-            and_(
-                Group.id == TicketTypeDefinition.default_team_id,
-                Group.entity_id == user.entity_id,
-            ),
-        )
+        select(Group.id, Group.name, func.count(Ticket.id))
+        .join(Group, and_(Group.id == route_team_id, Group.entity_id == user.entity_id))
         .where(*conditions)
-        .group_by(Group.id)
+        .group_by(Group.id, Group.name)
     )
-    return [{"team_id": team_id, "count": count} for team_id, count in rows.all()]
+    result = [
+        {"team_id": team_id, "team_name": team_name, "count": count}
+        for team_id, team_name, count in rows.all()
+    ]
+    unassigned = await db.scalar(
+        select(func.count(Ticket.id)).where(
+            Ticket.entity_id == user.entity_id,
+            Ticket.deleted_at.is_(None),
+            Ticket.assignee_id.is_(None),
+            route_team_id.is_(None),
+            ticket_visibility_scope(user, "unassigned") if has_profile_right(user, "ticket:view_queue") else ticket_visibility_scope(user),
+        )
+    ) or 0
+    result.append({"team_id": None, "team_name": "Unassigned", "count": unassigned})
+    return result
+
+
+@router.get("/tickets/queue-counts")
+async def ticket_queue_counts(user: CurrentUser, db: DbSession) -> dict[str, int]:
+    if not has_profile_right(user, "ticket:view_queue"):
+        raise HTTPException(status_code=403, detail="Ticket queue access required")
+    counts = {
+        "all": await db.scalar(
+            select(func.count(Ticket.id)).where(
+                Ticket.entity_id == user.entity_id,
+                Ticket.deleted_at.is_(None),
+                ticket_visibility_scope(user),
+            )
+        ) or 0
+    }
+    for queue in ("mine", "teams", "unassigned"):
+        counts[queue] = await db.scalar(
+            select(func.count(Ticket.id)).where(
+                Ticket.entity_id == user.entity_id,
+                Ticket.deleted_at.is_(None),
+                ticket_visibility_scope(user, queue),
+            )
+        ) or 0
+    return counts
 
 
 @router.get("/tickets/list-profiles", response_model=list[ListProfileRead])
@@ -402,8 +498,8 @@ async def delete_list_profile(profile_id: int, user: CurrentUser, db: DbSession)
 
 @router.get("/tickets/{ticket_id}", response_model=TicketRead)
 async def get_ticket(ticket_id: int, user: CurrentUser, db: DbSession) -> Ticket:
-    ticket = await db.scalar(select(Ticket).where(Ticket.id == ticket_id, Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None)))
-    if ticket is None or (user.profile.interface == "self_service" and ticket.requester_id != user.id):
+    ticket = await get_scoped_ticket(ticket_id, user, db)
+    if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return ticket
 
@@ -415,6 +511,12 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
     if user.profile.interface == "self_service":
         field_values.pop("user", None)
         field_values.pop("organisation", None)
+        disallowed_fields = set(field_values) - {"summary", "details", "category", "urgency", "impact"}
+        if disallowed_fields:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Fields are not editable by Requesters: {', '.join(sorted(disallowed_fields))}",
+            )
         trusted_field_values = {"user": user.id, "organisation": user.entity_id}
     if isinstance(payload.description, str):
         payload.description = sanitize_rich_text(payload.description)
@@ -425,6 +527,16 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
     ))
     if ticket_type_id is None:
         raise HTTPException(status_code=422, detail="A valid ticket type is required")
+    if user.profile.name == "Requester":
+        ticket_type = await db.scalar(select(TicketTypeDefinition).where(
+            TicketTypeDefinition.id == ticket_type_id,
+            (TicketTypeDefinition.entity_id == user.entity_id) | (TicketTypeDefinition.entity_id.is_(None)),
+            TicketTypeDefinition.is_active.is_(True),
+        ))
+        if ticket_type is not None and ticket_type.itil_class not in {"INCIDENT", "REQUEST"}:
+            raise HTTPException(status_code=422, detail="Ticket type is not available in the self-service portal")
+    if "sla" in field_values and not has_profile_right(user, "override_sla"):
+        raise HTTPException(status_code=403, detail="SLA override permission required")
     field_values = await validate_custom_fields(
         db,
         ticket_type_id,
@@ -436,8 +548,8 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
     if payload.category_id is not None and await db.scalar(select(Category).where(Category.id == payload.category_id, Category.entity_id == user.entity_id)) is None:
         raise HTTPException(status_code=422, detail="Category is outside your entity")
     requested_sla_id = payload.sla_id
-    if requested_sla_id is not None and user.profile.name != "Administrator":
-        raise HTTPException(status_code=403, detail="Only administrators may override the SLA")
+    if requested_sla_id is not None and not has_profile_right(user, "override_sla"):
+        raise HTTPException(status_code=403, detail="SLA override permission required")
     requester_id = user.id
     if user.profile.interface == "helpdesk" and payload.requester_id is not None:
         requester = await db.scalar(select(User).where(
@@ -457,13 +569,32 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
         ticket.status = "ASSIGNED"
     db.add(ticket)
     await db.flush()
-    sla = await db.scalar(select(SLA).where(SLA.id == requested_sla_id, SLA.entity_id == user.entity_id, SLA.is_active.is_(True))) if requested_sla_id else await db.scalar(select(SLA).where(SLA.entity_id == user.entity_id, SLA.is_active.is_(True)).order_by(SLA.id))
+    if requested_sla_id:
+        sla = await db.scalar(
+            select(SLA).where(
+                SLA.id == requested_sla_id,
+                SLA.entity_id == user.entity_id,
+                SLA.is_active.is_(True),
+            )
+        )
+    else:
+        entity_name = await db.scalar(select(Entity.name).where(Entity.id == user.entity_id))
+        sla = await db.scalar(
+            select(SLA).where(
+                SLA.entity_id == user.entity_id,
+                SLA.name == f"{entity_name} Priority {priority} SLA",
+                SLA.is_active.is_(True),
+            )
+        )
+        if sla is None:
+            sla = await db.scalar(select(SLA).where(SLA.entity_id == user.entity_id, SLA.is_active.is_(True)).order_by(SLA.id))
     if requested_sla_id and sla is None:
         raise HTTPException(status_code=422, detail="SLA is outside your entity or inactive")
     if sla:
         ticket.sla_id = sla.id
-        calculate_sla_deadlines(ticket, sla.tto_minutes, sla.ttr_minutes)
+        calculate_sla_deadlines(ticket, sla.tto_minutes, sla.ttr_minutes, sla.calendar)
     rules = await db.scalars(select(BusinessRule).where(BusinessRule.entity_id == user.entity_id, BusinessRule.trigger == "ON_CREATE", BusinessRule.is_active.is_(True)).order_by(BusinessRule.order))
+    assigned_group_id: int | None = None
     for rule in rules:
         if conditions_match(ticket, rule.conditions):
             actions = rule.actions
@@ -478,35 +609,133 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
                 if assignee:
                     ticket.assignee_id = assignee.id
                     ticket.status = "ASSIGNED"
+            if "set_team" in actions:
+                group = await db.scalar(
+                    select(Group).where(
+                        Group.id == int(actions["set_team"]),
+                        Group.entity_id == user.entity_id,
+                    )
+                )
+                if group:
+                    assigned_group_id = group.id
             if "set_sla" in actions:
                 rule_sla = await db.scalar(select(SLA).where(SLA.id == int(actions["set_sla"]), SLA.entity_id == user.entity_id, SLA.is_active.is_(True)))
                 if rule_sla:
                     ticket.sla_id = rule_sla.id
-                    calculate_sla_deadlines(ticket, rule_sla.tto_minutes, rule_sla.ttr_minutes)
+                    calculate_sla_deadlines(ticket, rule_sla.tto_minutes, rule_sla.ttr_minutes, rule_sla.calendar)
     db.add(TicketActor(ticket_id=ticket.id, actor_type="USER", actor_id=requester_id, role="REQUESTER"))
+    if assigned_group_id is not None:
+        db.add(TicketActor(ticket_id=ticket.id, actor_type="GROUP", actor_id=assigned_group_id, role="ASSIGNEE"))
     await store_field_values(db, ticket, field_values)
     await db.commit()
     await db.refresh(ticket)
     await record_audit(db, entity="ticket", entity_id=ticket.id, action="created", actor_id=user.id, diff={"status": ticket.status})
     await db.commit()
     send_ticket_notification.delay(ticket.id, "created")
+    if ticket.assignee_id is not None:
+        send_ticket_notification.delay(ticket.id, "assigned")
+    return ticket
+
+
+@router.post("/tickets/{ticket_id}/claim", response_model=TicketRead)
+async def claim_ticket(ticket_id: int, user: CurrentUser, db: DbSession) -> Ticket:
+    if not has_profile_right(user, "ticket:claim") or not has_profile_right(user, "ticket:view_queue"):
+        raise HTTPException(status_code=403, detail="Ticket claim permission required")
+
+    ticket = await db.scalar(
+        select(Ticket)
+        .where(
+            Ticket.id == ticket_id,
+            Ticket.entity_id == user.entity_id,
+            Ticket.deleted_at.is_(None),
+        )
+        .with_for_update()
+    )
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    if ticket.assignee_id is not None:
+        route_team_id = await db.scalar(select(ticket_route_team_id()).where(Ticket.id == ticket.id))
+        if route_team_id is not None:
+            visible_team = await db.scalar(
+                select(GroupMember.group_id).where(
+                    GroupMember.user_id == user.id,
+                    GroupMember.group_id == route_team_id,
+                    GroupMember.group_id == Group.id,
+                    Group.entity_id == user.entity_id,
+                ).select_from(GroupMember).join(Group, Group.id == GroupMember.group_id)
+            )
+            if visible_team is None:
+                raise HTTPException(status_code=404, detail="Ticket not found")
+        raise HTTPException(status_code=409, detail="Ticket is already assigned")
+    visible = await db.scalar(
+        select(Ticket.id).where(Ticket.id == ticket.id, ticket_visibility_scope(user))
+    )
+    if visible is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    transition = transition_status(ticket.status, "ASSIGNED", has_assignee=True)
+    workflow = await db.scalar(
+        select(TicketWorkflow).where(
+            TicketWorkflow.entity_id == user.entity_id,
+            TicketWorkflow.record_type == "ticket",
+            TicketWorkflow.is_active.is_(True),
+        )
+    )
+    if workflow is not None and (
+        "ASSIGNED" not in workflow.states
+        or "ASSIGNED" not in workflow.transitions.get(ticket.status, [])
+    ):
+        raise HTTPException(status_code=409, detail="Ticket workflow does not allow claiming this ticket")
+
+    ticket.assignee_id = user.id
+    ticket.status = str(transition["status"])
+    ticket_actor = TicketActor(
+        ticket_id=ticket.id,
+        actor_type="USER",
+        actor_id=user.id,
+        role="ASSIGNEE",
+    )
+    timeline_event = TicketFollowup(
+        ticket_id=ticket.id,
+        author_id=user.id,
+        body=sanitize_rich_text(f"Ticket claimed by {user.name}."),
+        is_private=True,
+    )
+    db.add_all([ticket_actor, timeline_event])
+    await record_audit(
+        db,
+        entity="ticket",
+        entity_id=ticket.id,
+        action="claimed",
+        actor_id=user.id,
+        diff={"assignee_id": user.id, "status": ticket.status},
+    )
+    await db.commit()
+    await db.refresh(ticket)
     return ticket
 
 
 @router.patch("/tickets/{ticket_id}", response_model=TicketRead)
 async def update_ticket(ticket_id: int, payload: TicketUpdate, user: CurrentUser, db: DbSession) -> Ticket:
     require_helpdesk(user)
-    ticket = await db.scalar(select(Ticket).where(Ticket.id == ticket_id, Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None)))
+    ticket = await get_scoped_ticket(ticket_id, user, db)
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    previous_status = ticket.status
+    previous_assignee_id = ticket.assignee_id
     values = payload.model_dump(exclude_unset=True)
     if "description" in values and isinstance(values["description"], str):
         values["description"] = sanitize_rich_text(values["description"])
     if "ticket_type_id" in values:
+        if "sla" in values.get("custom_fields", {}) and not has_profile_right(user, "override_sla"):
+            raise HTTPException(status_code=403, detail="SLA override permission required")
         values["custom_fields"] = await validate_custom_fields(
             db, values["ticket_type_id"], user.entity_id, user.profile.name, values.get("custom_fields", {})
         )
     elif "custom_fields" in values and ticket.ticket_type_id is not None:
+        if "sla" in values["custom_fields"] and not has_profile_right(user, "override_sla"):
+            raise HTTPException(status_code=403, detail="SLA override permission required")
         values["custom_fields"] = await validate_custom_fields(
             db, ticket.ticket_type_id, user.entity_id, user.profile.name, values["custom_fields"], ticket.custom_fields
         )
@@ -515,7 +744,42 @@ async def update_ticket(ticket_id: int, payload: TicketUpdate, user: CurrentUser
     if "assignee_id" in values and values["assignee_id"] is not None and await db.scalar(select(User).where(User.id == values["assignee_id"], User.entity_id == user.entity_id, User.is_active.is_(True))) is None:
         raise HTTPException(status_code=422, detail="Assignee is outside your entity or inactive")
     if "status" in values:
-        values.update(transition_status(ticket.status, values["status"], values.get("assignee_id", ticket.assignee_id) is not None))
+        workflow = await db.scalar(
+            select(TicketWorkflow).where(
+                TicketWorkflow.entity_id == user.entity_id,
+                TicketWorkflow.record_type == "ticket",
+                TicketWorkflow.is_active.is_(True),
+            )
+        )
+        if workflow is None:
+            values.update(transition_status(ticket.status, values["status"], values.get("assignee_id", ticket.assignee_id) is not None))
+        else:
+            target = values["status"]
+            if ticket.status not in workflow.states or target not in workflow.states:
+                raise HTTPException(status_code=422, detail="Ticket status is not configured in the active workflow")
+            if target != ticket.status and target not in workflow.transitions.get(ticket.status, []):
+                raise HTTPException(status_code=409, detail=f"Cannot transition ticket from {ticket.status} to {target}")
+            if target in {"ASSIGNED", "PLANNED"} and values.get("assignee_id", ticket.assignee_id) is None:
+                raise HTTPException(status_code=422, detail="An assignee is required")
+            required_approvals = workflow.approval_requirements.get(target, 0)
+            if required_approvals:
+                approved = await db.scalar(
+                    select(func.count(func.distinct(WorkflowApproval.decided_by))).select_from(WorkflowApproval).where(
+                        WorkflowApproval.entity_id == user.entity_id,
+                        WorkflowApproval.record_type == "ticket",
+                        WorkflowApproval.record_id == ticket.id,
+                        WorkflowApproval.transition_to == target,
+                        WorkflowApproval.status == "APPROVED",
+                    )
+                )
+                if (approved or 0) < required_approvals:
+                    raise HTTPException(status_code=409, detail="Required approvals are incomplete")
+            from datetime import UTC, datetime
+
+            if target == "SOLVED":
+                values["solved_at"] = ticket.solved_at or datetime.now(UTC)
+            elif target == "CLOSED":
+                values["closed_at"] = datetime.now(UTC)
     if "urgency" in values or "impact" in values:
         matrix = await db.scalar(select(PriorityMatrix).where(PriorityMatrix.entity_id == user.entity_id))
         values["priority"] = calculate_priority(values.get("urgency", ticket.urgency), values.get("impact", ticket.impact)) if matrix is None else matrix.matrix[values.get("urgency", ticket.urgency) - 1][values.get("impact", ticket.impact) - 1]
@@ -538,18 +802,22 @@ async def update_ticket(ticket_id: int, payload: TicketUpdate, user: CurrentUser
                 sla = await db.scalar(select(SLA).where(SLA.id == int(actions["set_sla"]), SLA.entity_id == user.entity_id, SLA.is_active.is_(True)))
                 if sla:
                     ticket.sla_id = sla.id
-                    calculate_sla_deadlines(ticket, sla.tto_minutes, sla.ttr_minutes)
+                    calculate_sla_deadlines(ticket, sla.tto_minutes, sla.ttr_minutes, sla.calendar)
     await db.commit()
     await record_audit(db, entity="ticket", entity_id=ticket.id, action="updated", actor_id=user.id, diff=values)
     await db.commit()
     await db.refresh(ticket)
+    if ticket.assignee_id is not None and ticket.assignee_id != previous_assignee_id:
+        send_ticket_notification.delay(ticket.id, "assigned")
+    if ticket.status == "SOLVED" and previous_status != "SOLVED":
+        send_ticket_notification.delay(ticket.id, "solved")
     return ticket
 
 
 @router.delete("/tickets/{ticket_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_ticket(ticket_id: int, user: CurrentUser, db: DbSession) -> None:
     require_admin(user)
-    ticket = await db.scalar(select(Ticket).where(Ticket.id == ticket_id, Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None)))
+    ticket = await get_scoped_ticket(ticket_id, user, db)
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     from datetime import UTC, datetime
@@ -560,8 +828,8 @@ async def delete_ticket(ticket_id: int, user: CurrentUser, db: DbSession) -> Non
 
 @router.get("/tickets/{ticket_id}/actors", response_model=list[ActorRead])
 async def actors(ticket_id: int, user: CurrentUser, db: DbSession) -> list[TicketActor]:
-    ticket = await db.scalar(select(Ticket).where(Ticket.id == ticket_id, Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None)))
-    if ticket is None or (user.profile.interface == "self_service" and ticket.requester_id != user.id):
+    ticket = await get_scoped_ticket(ticket_id, user, db)
+    if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return list((await db.scalars(select(TicketActor).where(TicketActor.ticket_id == ticket_id).order_by(TicketActor.id))).all())
 
@@ -569,7 +837,7 @@ async def actors(ticket_id: int, user: CurrentUser, db: DbSession) -> list[Ticke
 @router.post("/tickets/{ticket_id}/actors", response_model=ActorRead, status_code=status.HTTP_201_CREATED)
 async def add_actor(ticket_id: int, payload: ActorCreate, user: CurrentUser, db: DbSession) -> TicketActor:
     require_helpdesk(user)
-    ticket = await db.scalar(select(Ticket).where(Ticket.id == ticket_id, Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None)))
+    ticket = await get_scoped_ticket(ticket_id, user, db)
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     if payload.actor_type == "USER":
@@ -593,8 +861,8 @@ async def add_actor(ticket_id: int, payload: ActorCreate, user: CurrentUser, db:
 
 @router.get("/tickets/{ticket_id}/followups", response_model=list[FollowupRead])
 async def followups(ticket_id: int, user: CurrentUser, db: DbSession) -> list[TicketFollowup]:
-    ticket = await db.scalar(select(Ticket).where(Ticket.id == ticket_id, Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None)))
-    if ticket is None or (user.profile.interface == "self_service" and ticket.requester_id != user.id):
+    ticket = await get_scoped_ticket(ticket_id, user, db)
+    if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     query = select(TicketFollowup).where(TicketFollowup.ticket_id == ticket_id)
     if user.profile.interface == "self_service":
@@ -604,8 +872,8 @@ async def followups(ticket_id: int, user: CurrentUser, db: DbSession) -> list[Ti
 
 @router.post("/tickets/{ticket_id}/followups", response_model=FollowupRead, status_code=status.HTTP_201_CREATED)
 async def add_followup(ticket_id: int, payload: FollowupCreate, user: CurrentUser, db: DbSession) -> TicketFollowup:
-    ticket = await db.scalar(select(Ticket).where(Ticket.id == ticket_id, Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None)))
-    if ticket is None or (user.profile.interface == "self_service" and ticket.requester_id != user.id):
+    ticket = await get_scoped_ticket(ticket_id, user, db)
+    if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     if payload.is_private:
         require_helpdesk(user)
@@ -617,12 +885,14 @@ async def add_followup(ticket_id: int, payload: FollowupCreate, user: CurrentUse
     await db.refresh(followup)
     await record_audit(db, entity="ticket_followup", entity_id=followup.id, action="created", actor_id=user.id, diff={"ticket_id": ticket.id, "is_private": followup.is_private})
     await db.commit()
+    if not followup.is_private:
+        send_ticket_notification.delay(ticket.id, "public_reply")
     return followup
 
 
 async def scoped_ticket(ticket_id: int, user: CurrentUser, db: DbSession) -> Ticket:
-    ticket = await db.scalar(select(Ticket).where(Ticket.id == ticket_id, Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None)))
-    if ticket is None or (user.profile.interface == "self_service" and ticket.requester_id != user.id):
+    ticket = await get_scoped_ticket(ticket_id, user, db)
+    if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return ticket
 
@@ -761,7 +1031,12 @@ async def list_links(ticket_id: int, user: CurrentUser, db: DbSession) -> list[T
 async def link_ticket(ticket_id: int, payload: LinkCreate, user: CurrentUser, db: DbSession) -> TicketLink:
     require_helpdesk(user)
     ticket = await scoped_ticket(ticket_id, user, db)
-    linked = await db.scalar(select(Ticket).where(Ticket.id == payload.linked_ticket_id, Ticket.entity_id == user.entity_id))
+    linked = await db.scalar(select(Ticket).where(
+        Ticket.id == payload.linked_ticket_id,
+        Ticket.entity_id == user.entity_id,
+        Ticket.deleted_at.is_(None),
+        ticket_visibility_scope(user),
+    ))
     if linked is None or linked.id == ticket.id:
         raise HTTPException(status_code=422, detail="Linked ticket is invalid")
     link = TicketLink(ticket_id=ticket.id, **payload.model_dump())

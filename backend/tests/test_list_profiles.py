@@ -127,7 +127,11 @@ async def real_postgres_http():
         entity_a = Entity(name=f"Slice2 entity A {suffix}")
         entity_b = Entity(name=f"Slice2 entity B {suffix}")
         requester_profile = Profile(name=f"Slice2 requester {suffix}", interface="self_service")
-        helpdesk_profile = Profile(name=f"Slice2 helpdesk {suffix}", interface="helpdesk")
+        helpdesk_profile = Profile(
+            name=f"Slice2 helpdesk {suffix}",
+            interface="helpdesk",
+            rights={"ticket:view_all": True},
+        )
         db.add_all([entity_a, entity_b, requester_profile, helpdesk_profile])
         await db.flush()
         foreign_group = Group(name=f"Entity B team {suffix}", entity_id=entity_b.id)
@@ -369,7 +373,7 @@ async def test_http_ticket_and_team_counts_are_entity_scoped(real_postgres_http)
     counts_a = await client.get("/api/v1/tickets/team-counts")
     assert tickets_a.status_code == counts_a.status_code == 200
     assert tickets_a.json()["total"] == 2
-    assert sum(item["count"] for item in counts_a.json()) == 2
+    assert sum(item["count"] for item in counts_a.json()) == 1
     assert all(item["team_id"] != real_postgres_http["foreign_group"].id for item in counts_a.json())
     assert all(ticket["entity_id"] == real_postgres_http["entities"]["a"].id for ticket in tickets_a.json()["items"])
 
@@ -378,7 +382,14 @@ async def test_http_ticket_and_team_counts_are_entity_scoped(real_postgres_http)
     counts_b = await client.get("/api/v1/tickets/team-counts")
     assert tickets_b.json()["total"] == 3
     assert sum(item["count"] for item in counts_b.json()) == 3
-    assert counts_b.json() == [{"team_id": real_postgres_http["foreign_group"].id, "count": 3}]
+    assert counts_b.json() == [
+        {
+            "team_id": real_postgres_http["foreign_group"].id,
+            "team_name": real_postgres_http["foreign_group"].name,
+            "count": 3,
+        },
+        {"team_id": None, "team_name": "Unassigned", "count": 0},
+    ]
     assert all(ticket["entity_id"] == real_postgres_http["entities"]["b"].id for ticket in tickets_b.json()["items"])
 
 

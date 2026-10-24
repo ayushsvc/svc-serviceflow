@@ -25,7 +25,7 @@ class TicketTypeFieldInput(BaseModel):
     visible_to_roles: list[str] = Field(default_factory=lambda: ["Administrator", "Technician", "Requester"])
     editable_by_roles: list[str] = Field(default_factory=lambda: ["Administrator", "Technician"])
     default_value: Any = None
-    show_on_portal: bool = True
+    show_on_portal: bool = False
     show_condition: dict[str, Any] = Field(default_factory=dict)
 
 

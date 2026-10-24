@@ -27,6 +27,8 @@ class _ListDb:
 
     async def execute(self, query: object) -> _Rows:
         self.executed.append(query)
+        if "groups.id" in str(query):
+            return _Rows([])
         ticket = SimpleNamespace(
             id=1, title="Visible", description="Details", type="INCIDENT", status="NEW",
             urgency=3, impact=3, priority=3, category_id=None, entity_id=1, source="web",
@@ -39,7 +41,12 @@ class _ListDb:
 
 
 def _user(interface: str = "helpdesk", entity_id: int = 1) -> SimpleNamespace:
-    return SimpleNamespace(id=10, entity_id=entity_id, profile=SimpleNamespace(interface=interface, name="Technician"))
+    rights = {"ticket:view_all": True} if interface == "helpdesk" else {"ticket:own_only": True}
+    return SimpleNamespace(
+        id=10,
+        entity_id=entity_id,
+        profile=SimpleNamespace(interface=interface, name="Technician", rights=rights),
+    )
 
 
 def test_search_escapes_sql_wildcards() -> None:
@@ -58,6 +65,7 @@ async def test_list_metadata_and_sort_whitelist() -> None:
         page_size=25,
         sort="priority",
         direction="asc",
+        queue=None,
     )
     assert result["page"] == 2
     assert result["page_size"] == 25
@@ -95,6 +103,7 @@ async def test_requester_response_omits_internal_indicators() -> None:
         direction="desc",
         page=1,
         page_size=25,
+        queue=None,
     )
     item = result["items"][0]
     assert item["requester_name"] is None
@@ -123,6 +132,7 @@ async def test_list_query_scopes_entity_requester_and_soft_delete() -> None:
         direction="desc",
         page=1,
         page_size=25,
+        queue=None,
     )
     query = str(db.executed[-1])
     assert "entity_id" in query

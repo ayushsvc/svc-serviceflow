@@ -9,18 +9,30 @@ from sqlalchemy import select
 
 from app.core.db import SessionLocal
 from app.core.config import get_settings
-from app.models import NotificationTemplate, RecurringTicket, Ticket, User
+from app.models import AuditLog, NotificationTemplate, RecurringTicket, Ticket, User
+from app.services.content import sanitize_rich_text
 from app.services.tickets import calculate_priority
 from app.workers.celery_app import celery_app
+
+_worker_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _run_async(coroutine):
+    global _worker_loop
+    if _worker_loop is None or _worker_loop.is_closed():
+        _worker_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_worker_loop)
+    return _worker_loop.run_until_complete(coroutine)
 
 
 @celery_app.task
 def check_sla_breaches() -> dict[str, str]:
-    asyncio.run(_check_sla_breaches())
+    _run_async(_check_sla_breaches())
     return {"status": "checked"}
 
 
 async def _check_sla_breaches() -> None:
+    breached_ticket_ids: list[int] = []
     async with SessionLocal() as db:
         now = datetime.now(UTC)
         result = await db.scalars(
@@ -31,12 +43,31 @@ async def _check_sla_breaches() -> None:
         )
         for ticket in result:
             ticket.priority = max(ticket.priority, 4)
+            notified = await db.scalar(
+                select(AuditLog.id).where(
+                    AuditLog.entity == "sla_notification",
+                    AuditLog.entity_id == ticket.id,
+                    AuditLog.action == "breach_sent",
+                )
+            )
+            if notified is None:
+                db.add(
+                    AuditLog(
+                        entity="sla_notification",
+                        entity_id=ticket.id,
+                        action="breach_sent",
+                        diff={},
+                    )
+                )
+                breached_ticket_ids.append(ticket.id)
         await db.commit()
+    for ticket_id in breached_ticket_ids:
+        send_ticket_notification.delay(ticket_id, "sla_breach")
 
 
 @celery_app.task
 def create_recurring_tickets() -> dict[str, int]:
-    created = asyncio.run(_create_recurring_tickets())
+    created = _run_async(_create_recurring_tickets())
     return {"created": created}
 
 
@@ -45,7 +76,7 @@ async def _create_recurring_tickets() -> int:
         now = datetime.now(UTC)
         recurring_items = list(await db.scalars(select(RecurringTicket).where(RecurringTicket.is_active.is_(True), RecurringTicket.next_run_at <= now)))
         for recurring in recurring_items:
-            db.add(Ticket(title=recurring.title, description=recurring.description, entity_id=recurring.entity_id, requester_id=recurring.requester_id, urgency=recurring.urgency, impact=recurring.impact, priority=calculate_priority(recurring.urgency, recurring.impact), source="recurring"))
+            db.add(Ticket(title=recurring.title, description=sanitize_rich_text(recurring.description), entity_id=recurring.entity_id, requester_id=recurring.requester_id, urgency=recurring.urgency, impact=recurring.impact, priority=calculate_priority(recurring.urgency, recurring.impact), source="recurring"))
             recurring.next_run_at = croniter(recurring.cron_expr, now).get_next(datetime)
         await db.commit()
         return len(recurring_items)
@@ -53,7 +84,7 @@ async def _create_recurring_tickets() -> int:
 
 @celery_app.task
 def send_ticket_notification(ticket_id: int, event: str) -> dict[str, str]:
-    asyncio.run(_send_ticket_notification(ticket_id, event))
+    _run_async(_send_ticket_notification(ticket_id, event))
     return {"status": "sent"}
 
 

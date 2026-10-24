@@ -154,6 +154,46 @@ class ListProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class TicketWorkflow(Base):
+    __tablename__ = "ticket_workflows"
+    __table_args__ = (UniqueConstraint("entity_id", "record_type", name="uq_ticket_workflows_entity_type"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    entity_id: Mapped[int] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), index=True)
+    record_type: Mapped[str] = mapped_column(String(40))
+    states: Mapped[list] = mapped_column(JSONB, default=list)
+    transitions: Mapped[dict] = mapped_column(JSONB, default=dict)
+    approval_requirements: Mapped[dict] = mapped_column(JSONB, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class WorkflowApproval(Base):
+    __tablename__ = "workflow_approvals"
+    __table_args__ = (
+        CheckConstraint(
+            "(approver_user_id IS NOT NULL AND approver_group_id IS NULL) OR "
+            "(approver_user_id IS NULL AND approver_group_id IS NOT NULL)",
+            name="ck_workflow_approvals_single_approver",
+        ),
+        CheckConstraint("status IN ('PENDING', 'APPROVED', 'REJECTED')", name="ck_workflow_approvals_status"),
+        Index("ix_workflow_approvals_record_status", "entity_id", "record_type", "record_id", "transition_to", "status"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    entity_id: Mapped[int] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), index=True)
+    record_type: Mapped[str] = mapped_column(String(40))
+    record_id: Mapped[int] = mapped_column(Integer)
+    transition_to: Mapped[str] = mapped_column(String(40))
+    step: Mapped[int] = mapped_column(Integer, default=1)
+    approver_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    approver_group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    decided_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class TicketStatus(StrEnum):
     NEW = "NEW"
     ASSIGNED = "ASSIGNED"

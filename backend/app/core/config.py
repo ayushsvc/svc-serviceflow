@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "postgresql+asyncpg://svc:svc@db:5432/svc"
     redis_url: str = "redis://redis:6379/0"
-    jwt_secret: str = "change-this-development-secret"
+    jwt_secret: str
     access_token_minutes: int = 30
     refresh_token_days: int = 14
     cors_origins: str = "http://localhost:3000"
@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     trusted_proxy_ips: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_jwt_secret(cls, values: object) -> object:
+        if not isinstance(values, dict) or not values.get("jwt_secret"):
+            raise ValueError("JWT_SECRET is required from the environment in every mode")
+        return values
 
     @model_validator(mode="after")
     def validate_security(self) -> "Settings":

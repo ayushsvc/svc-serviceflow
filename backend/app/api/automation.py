@@ -67,7 +67,9 @@ async def create_recurring(payload: RecurringTicketCreate, user: CurrentUser, db
     requester = await db.scalar(select(User).where(User.id == payload.requester_id, User.entity_id == user.entity_id, User.is_active.is_(True)))
     if requester is None:
         raise HTTPException(status_code=422, detail="Requester is outside your entity or inactive")
-    recurring = RecurringTicket(entity_id=user.entity_id, **payload.model_dump())
+    values = payload.model_dump()
+    values["description"] = sanitize_rich_text(values["description"])
+    recurring = RecurringTicket(entity_id=user.entity_id, **values)
     db.add(recurring)
     await db.commit()
     await db.refresh(recurring)
