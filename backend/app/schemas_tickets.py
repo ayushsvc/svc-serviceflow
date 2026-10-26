@@ -38,7 +38,7 @@ class ActorRead(ActorCreate):
 class TicketCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str = Field(min_length=5, max_length=240)
-    description: str = Field(min_length=10, max_length=30000)
+    description: str = Field(max_length=30000)
     type: str = Field(default="INCIDENT", pattern="^(INCIDENT|REQUEST|PROBLEM|PROJECT|FILE_SHARE|ADMIN_ACCESS|VPN_ACCESS)$")
     urgency: StrictInt | None = Field(default=None, ge=1, le=5)
     impact: StrictInt | None = Field(default=None, ge=1, le=5)
@@ -61,7 +61,7 @@ class RequesterRead(BaseModel):
 class TicketUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str | None = Field(default=None, min_length=5, max_length=240)
-    description: str | None = Field(default=None, min_length=10, max_length=30000)
+    description: str | None = Field(default=None, max_length=30000)
     status: str | None = None
     urgency: StrictInt | None = Field(default=None, ge=1, le=5)
     impact: StrictInt | None = Field(default=None, ge=1, le=5)

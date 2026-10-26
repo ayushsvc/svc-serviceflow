@@ -449,7 +449,7 @@ async def test_form_schema_and_submitted_fields_are_role_filtered(real_postgres_
         },
     )
     assert rejected.status_code == 422
-    assert rejected.status_code == 422
+    assert hidden_key in rejected.json()["detail"]
 
 
 @pytest.mark.asyncio

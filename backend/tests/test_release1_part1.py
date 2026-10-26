@@ -386,3 +386,81 @@ async def test_requester_description_is_sanitized(real_postgres_http) -> None:
     assert response.json()["description"] == "<p>Safe details</p>"
     assert response.json()["custom_fields"]["details"] == "<p>Safe details</p>"
     assert "<script" not in response.text and "onerror" not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("description", ["<p><br></p>", "123456789"])
+async def test_ticket_description_minimum_uses_sanitized_text_on_create_and_update(
+    real_postgres_http,
+    description,
+) -> None:
+    client = real_postgres_http["client"]
+    db = real_postgres_http["db"]
+    requester = real_postgres_http["users"]["A_requester"]
+    staff = real_postgres_http["users"]["A_staff"]
+    incident = await _ticket_type(db, "INCIDENT")
+
+    for user, role in ((requester, "Requester"), (staff, "Staff")):
+        real_postgres_http["state"]["user"] = user
+        response = await client.post(
+            "/api/v1/tickets",
+            json={
+                "title": f"Short description {role} {uuid4().hex}",
+                "description": description,
+                "type": "INCIDENT",
+                "ticket_type_id": incident.id,
+                "priority": "medium" if role == "Requester" else 3,
+                **({"requester_id": requester.id} if role == "Staff" else {}),
+            },
+        )
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"] == "Description must contain at least 10 characters of text."
+
+    real_postgres_http["state"]["user"] = requester
+    created = await _create_requester_ticket(
+        real_postgres_http,
+        priority="medium",
+        description="A sufficiently detailed initial description.",
+    )
+    assert created.status_code == 201, created.text
+    real_postgres_http["state"]["user"] = staff
+    updated = await client.patch(
+        f"/api/v1/tickets/{created.json()['id']}",
+        json={"description": description},
+    )
+    assert updated.status_code == 422, updated.text
+    assert updated.json()["detail"] == "Description must contain at least 10 characters of text."
+
+
+@pytest.mark.asyncio
+async def test_printer_description_is_accepted_on_create_and_update(real_postgres_http) -> None:
+    created = await _create_requester_ticket(
+        real_postgres_http,
+        priority="medium",
+        description="Printer not working",
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["description"] == "Printer not working"
+
+    real_postgres_http["state"]["user"] = real_postgres_http["users"]["A_staff"]
+    updated = await real_postgres_http["client"].patch(
+        f"/api/v1/tickets/{created.json()['id']}",
+        json={"description": "Printer not working"},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["description"] == "Printer not working"
+
+
+@pytest.mark.asyncio
+async def test_script_payload_is_sanitized_on_update(real_postgres_http) -> None:
+    created = await _create_requester_ticket(real_postgres_http, priority="medium")
+    assert created.status_code == 201, created.text
+    real_postgres_http["state"]["user"] = real_postgres_http["users"]["A_staff"]
+    attack = '<p>Safe details</p><script>alert(1)</script><img src=x onerror="alert(2)">'
+    updated = await real_postgres_http["client"].patch(
+        f"/api/v1/tickets/{created.json()['id']}",
+        json={"description": attack},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["description"] == "<p>Safe details</p>"
+    assert "<script" not in updated.text and "onerror" not in updated.text

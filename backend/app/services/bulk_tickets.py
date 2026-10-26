@@ -30,7 +30,7 @@ from app.models import (
 from app.schemas_tickets import TicketBulkUpdate
 from app.services.audit import record_audit
 from app.services.automation import calculate_sla_deadlines, conditions_match
-from app.services.content import sanitize_rich_text
+from app.services.content import sanitize_rich_text, sanitize_ticket_description
 from app.services.field_engine import field_role_for_user, get_type_fields, store_field_values, validate_custom_fields
 from app.services.tickets import calculate_priority, priority_urgency_impact, transition_status
 from app.workers.tasks import send_ticket_notification, send_user_ticket_notification
@@ -224,7 +224,10 @@ async def apply_ticket_update(
         elif changes["assignee_id"] is not None and ticket.status == "NEW":
             changes.setdefault("status", "ASSIGNED")
     if "description" in changes and isinstance(changes["description"], str):
-        changes["description"] = sanitize_rich_text(changes["description"])
+        try:
+            changes["description"] = sanitize_ticket_description(changes["description"])
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     if "ticket_type_id" in changes:
         if "sla" in changes.get("custom_fields", {}) and not has_right(user, "override_sla"):
             raise HTTPException(status_code=403, detail="SLA override permission required")

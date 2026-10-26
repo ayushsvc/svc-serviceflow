@@ -3,6 +3,9 @@ from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
 
+MIN_DESCRIPTION_TEXT_LENGTH = 10
+
+
 class _SafeHTML(HTMLParser):
     allowed_tags = {"p", "br", "strong", "b", "em", "i", "u", "ul", "ol", "li", "a"}
     suppressed_tags = {"embed", "iframe", "math", "noscript", "object", "script", "style", "svg", "template"}
@@ -52,3 +55,33 @@ def sanitize_rich_text(value: str) -> str:
     parser.feed(value)
     parser.close()
     return "".join(parser.output)
+
+
+class _PlainText(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"br", "li", "p"}:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"li", "p"}:
+            self.parts.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
+def sanitize_ticket_description(value: str) -> str:
+    sanitized = sanitize_rich_text(value)
+    parser = _PlainText()
+    parser.feed(sanitized)
+    parser.close()
+    plain_text = " ".join("".join(parser.parts).split())
+    if len(plain_text) < MIN_DESCRIPTION_TEXT_LENGTH:
+        raise ValueError(
+            f"Description must contain at least {MIN_DESCRIPTION_TEXT_LENGTH} characters of text."
+        )
+    return sanitized

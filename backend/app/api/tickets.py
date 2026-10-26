@@ -17,7 +17,7 @@ from app.services.tickets import calculate_priority, priority_label, priority_op
 from app.workers.tasks import send_ticket_notification
 from app.services.audit import record_audit
 from app.services.field_engine import REQUESTER_FORM_FIELDS, field_role_for_user, store_field_values, validate_custom_fields
-from app.services.content import sanitize_rich_text
+from app.services.content import sanitize_rich_text, sanitize_ticket_description
 from app.services.bulk_tickets import apply_ticket_update, bulk_update_tickets as run_bulk_ticket_update, dispatch_ticket_update_effects
 
 router = APIRouter(tags=["tickets"])
@@ -692,8 +692,10 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
         selected_priority = None
     field_values["summary"] = payload.title
     field_values["details"] = payload.description
-    if isinstance(payload.description, str):
-        payload.description = sanitize_rich_text(payload.description)
+    try:
+        payload.description = sanitize_ticket_description(payload.description)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     ticket_type_id = payload.ticket_type_id or await db.scalar(select(TicketTypeDefinition.id).where(
         TicketTypeDefinition.itil_class == ("INCIDENT" if payload.type == "INCIDENT" else "REQUEST"),
         (TicketTypeDefinition.entity_id == user.entity_id) | (TicketTypeDefinition.entity_id.is_(None)),
