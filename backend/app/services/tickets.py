@@ -12,6 +12,58 @@ PRIORITY_MATRIX: tuple[tuple[int, ...], ...] = (
     (3, 3, 4, 5, 5),
 )
 
+PRIORITY_URGENCY_IMPACT: dict[int, tuple[int, int]] = {
+    1: (1, 1),
+    2: (2, 2),
+    3: (3, 3),
+    4: (4, 4),
+    5: (5, 5),
+}
+
+PRIORITY_LABELS: dict[int, str] = {
+    1: "Critical",
+    2: "High",
+    3: "Medium",
+    4: "Low-Medium",
+    5: "Low",
+}
+
+REQUESTER_PRIORITY_VALUES: dict[str, int] = {
+    "critical": 1,
+    "high": 2,
+    "medium": 3,
+    "low": 5,
+}
+
+
+def priority_urgency_impact(priority: int) -> tuple[int, int]:
+    try:
+        return PRIORITY_URGENCY_IMPACT[priority]
+    except KeyError as exc:
+        raise ValueError("priority must be between 1 and 5") from exc
+
+
+def priority_label(priority: int, *, requester: bool = False) -> str:
+    if priority not in PRIORITY_LABELS:
+        raise ValueError("priority must be between 1 and 5")
+    if requester and priority in {4, 5}:
+        return "Low"
+    return PRIORITY_LABELS[priority]
+
+
+def priority_options(*, requester: bool = False) -> list[dict[str, int | str]]:
+    return [
+        {"value": value, "label": priority_label(value, requester=requester)}
+        for value in range(1, 6)
+    ]
+
+
+def requester_priority_value(value: object) -> int:
+    if not isinstance(value, str) or value not in REQUESTER_PRIORITY_VALUES:
+        raise ValueError("Requester priority must be low, medium, high, or critical")
+    return REQUESTER_PRIORITY_VALUES[value]
+
+
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     TicketStatus.NEW.value: {TicketStatus.ASSIGNED.value, TicketStatus.PENDING.value},
     TicketStatus.ASSIGNED.value: {TicketStatus.PLANNED.value, TicketStatus.PENDING.value, TicketStatus.SOLVED.value},

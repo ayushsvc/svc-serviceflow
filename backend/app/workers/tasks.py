@@ -6,15 +6,25 @@ from email.message import EmailMessage
 from croniter import croniter
 from jinja2 import Template
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.core.db import SessionLocal
 from app.core.config import get_settings
 from app.models import AuditLog, NotificationTemplate, RecurringTicket, Ticket, User
 from app.services.content import sanitize_rich_text
-from app.services.tickets import calculate_priority
+from app.services.tickets import calculate_priority, priority_label
 from app.workers.celery_app import celery_app
 
 _worker_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _notification_ticket(ticket: Ticket, *, requester: bool) -> dict[str, object]:
+    values = {column.name: getattr(ticket, column.name) for column in Ticket.__table__.columns}
+    label = priority_label(ticket.priority, requester=requester)
+    values["priority_label"] = label
+    if requester:
+        values["priority"] = label
+    return values
 
 
 def _run_async(coroutine):
@@ -99,11 +109,14 @@ async def _send_ticket_notification(ticket_id: int, event: str) -> None:
         ticket = await db.scalar(select(Ticket).where(Ticket.id == ticket_id))
         if ticket is None:
             return
-        recipient = await db.scalar(select(User).where(User.id == ticket.requester_id))
+        recipient = await db.scalar(
+            select(User).options(selectinload(User.profile)).where(User.id == ticket.requester_id)
+        )
         template = await db.scalar(select(NotificationTemplate).where(NotificationTemplate.entity_id == ticket.entity_id, NotificationTemplate.event == event))
         if recipient is None or template is None:
             return
-        context = {"ticket": ticket, "user": recipient, "event": event}
+        requester = (recipient.profile.rights or {}).get("ticket:own_only") is True
+        context = {"ticket": _notification_ticket(ticket, requester=requester), "user": recipient, "event": event}
         message = EmailMessage()
         message["From"] = get_settings().mail_from
         message["To"] = recipient.email
@@ -117,7 +130,9 @@ async def _send_user_ticket_notification(ticket_id: int, user_id: int, event: st
     async with SessionLocal() as db:
         ticket = await db.scalar(select(Ticket).where(Ticket.id == ticket_id))
         recipient = await db.scalar(
-            select(User).where(User.id == user_id, User.is_active.is_(True))
+            select(User)
+            .options(selectinload(User.profile))
+            .where(User.id == user_id, User.is_active.is_(True))
         )
         if ticket is None or recipient is None or recipient.entity_id != ticket.entity_id:
             return
@@ -136,7 +151,8 @@ async def _send_user_ticket_notification(ticket_id: int, user_id: int, event: st
             )
         if template is None:
             return
-        context = {"ticket": ticket, "user": recipient, "event": event}
+        requester = (recipient.profile.rights or {}).get("ticket:own_only") is True
+        context = {"ticket": _notification_ticket(ticket, requester=requester), "user": recipient, "event": event}
         message = EmailMessage()
         message["From"] = get_settings().mail_from
         message["To"] = recipient.email

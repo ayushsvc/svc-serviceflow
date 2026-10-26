@@ -267,7 +267,7 @@ async def test_template_prefill_is_validated_sanitized_and_ticket_create_revalid
     )
     assert invalid_template.status_code == 422
 
-    attack = '<p>Safe</p><script>alert(1)</script><img src=x onerror="alert(2)">'
+    attack = '<p>Safe details</p><script>alert(1)</script><img src=x onerror="alert(2)">'
     created = await client.post(
         "/api/v1/ticket-templates",
         headers=admin_headers,
@@ -280,7 +280,7 @@ async def test_template_prefill_is_validated_sanitized_and_ticket_create_revalid
         },
     )
     assert created.status_code == 201, created.text
-    assert created.json()["prefilled"]["details"] == "<p>Safe</p>"
+    assert created.json()["prefilled"]["details"] == "<p>Safe details</p>"
     assert "<script" not in created.text and "onerror" not in created.text
 
     requester_headers = auth(template_http, "A_requester")
@@ -294,14 +294,14 @@ async def test_template_prefill_is_validated_sanitized_and_ticket_create_revalid
         headers=requester_headers,
         json={
             "title": "Ticket using a template",
-            "description": "A sufficiently long ticket description from a selected template.",
+            "description": detail.json()["prefilled"]["details"],
             "type": "INCIDENT",
             "ticket_type_id": type_id,
             "custom_fields": detail.json()["prefilled"],
         },
     )
     assert ticket.status_code == 201, ticket.text
-    assert ticket.json()["custom_fields"]["details"] == "<p>Safe</p>"
+    assert ticket.json()["custom_fields"]["details"] == "<p>Safe details</p>"
 
     invalid_ticket = await client.post(
         "/api/v1/tickets",

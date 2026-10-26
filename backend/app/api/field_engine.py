@@ -9,8 +9,8 @@ from app.deps import CurrentUser, DbSession, require_admin, require_helpdesk
 from app.models import BusinessRule, Category, CategoryTeam, FieldDefinition, Group, GroupMember, PriorityMatrix, SLA, TicketTypeDefinition, TicketTypeField, TicketTemplate, TicketTemplateUsage, User
 from app.schemas_field_engine import AssignmentPreview, FieldDefinitionCreate, FieldDefinitionRead, FormField, FormSchemaRead, PriorityMatrixPayload, PriorityMatrixRead, SlaPreview, TemplateCreate, TemplateDetailRead, TemplateListItem, TemplateRead, TemplateTeamRead, TicketTypeCreate, TicketTypeRead
 from app.services.audit import record_audit
-from app.services.field_engine import get_type_fields, sanitize_field_values, validate_condition, validate_template_prefilled
-from app.services.tickets import calculate_matrix_priority
+from app.services.field_engine import REQUESTER_FORM_FIELDS, field_role_for_user, get_type_fields, sanitize_field_values, validate_condition, validate_template_prefilled
+from app.services.tickets import calculate_matrix_priority, priority_label
 
 router = APIRouter(tags=["field-engine"])
 
@@ -119,17 +119,18 @@ async def delete_field_definition(field_id: int, user: CurrentUser, db: DbSessio
 
 @router.get("/ticket-types", response_model=list[TicketTypeRead])
 async def list_ticket_types(user: CurrentUser, db: DbSession) -> list[Any]:
+    requester = (user.profile.rights or {}).get("ticket:own_only") is True
     query = select(TicketTypeDefinition).where(
         ((TicketTypeDefinition.entity_id == user.entity_id) | (TicketTypeDefinition.entity_id.is_(None))),
         TicketTypeDefinition.is_active.is_(True),
     )
-    if user.profile.name == "Requester":
+    if requester:
         query = query.where(TicketTypeDefinition.itil_class.in_(["INCIDENT", "REQUEST"]))
     types = list((await db.scalars(query.order_by(TicketTypeDefinition.name))).all())
     results = []
     for ticket_type in types:
         result = await _ticket_type_output(db, ticket_type)
-        if user.profile.name == "Requester":
+        if requester:
             result["fields"] = [
                 field for field in result["fields"]
                 if "Requester" in field["visible_to_roles"] and field["show_on_portal"]
@@ -205,32 +206,62 @@ async def delete_ticket_type(ticket_type_id: int, user: CurrentUser, db: DbSessi
 @router.get("/ticket-types/{ticket_type_id}/form", response_model=FormSchemaRead)
 async def ticket_type_form(ticket_type_id: int, user: CurrentUser, db: DbSession) -> FormSchemaRead:
     ticket_type, fields = await get_type_fields(db, ticket_type_id, user.entity_id)
-    if user.profile.name == "Requester" and ticket_type.itil_class not in {"INCIDENT", "REQUEST"}:
+    role = field_role_for_user(user)
+    requester = role == "Requester"
+    if requester and ticket_type.itil_class not in {"INCIDENT", "REQUEST"}:
         raise HTTPException(status_code=404, detail="Ticket type not found")
     pages: dict[str, list[FormField]] = {}
     for definition, mapping in fields:
-        if user.profile.name not in mapping.visible_to_roles:
+        if requester and definition.key not in REQUESTER_FORM_FIELDS:
             continue
-        if user.profile.name == "Requester" and not mapping.show_on_portal:
+        if role not in mapping.visible_to_roles:
             continue
-        editable = user.profile.name in mapping.editable_by_roles
+        if requester and not mapping.show_on_portal:
+            continue
+        editable = role in mapping.editable_by_roles
         if definition.key == "sla":
             rights = user.profile.rights or {}
             editable = editable and (rights.get("*") is True or rights.get("override_sla") is True)
+        field_type = definition.type
+        options = definition.options or {}
+        label = definition.label
+        required = mapping.required
+        default_value = mapping.default_value
+        if requester:
+            if definition.key == "summary":
+                label = "Title (summary)"
+            elif definition.key == "details":
+                label = "Description"
+                field_type = "richtext"
+            elif definition.key == "priority":
+                field_type = "select"
+                label = "Priority"
+                options = {
+                    **options,
+                    "choices": ["low", "medium", "high", "critical"],
+                    "choice_labels": {
+                        "low": priority_label(5, requester=True),
+                        "medium": priority_label(3, requester=True),
+                        "high": priority_label(2, requester=True),
+                        "critical": priority_label(1, requester=True),
+                    },
+                }
+                required = True
+                if default_value is None:
+                    default_value = "medium"
+            elif definition.key == "attachments":
+                options = {**options, "widget": "attachments"}
         pages.setdefault(mapping.page, []).append(FormField(
-            key=definition.key, label=definition.label, type=definition.type, options=definition.options or {},
-            validation=definition.validation or {}, required=mapping.required, editable=editable,
-            default_value=mapping.default_value, page=mapping.page, show_on_portal=mapping.show_on_portal,
+            key=definition.key, label=label, type=field_type, options=options,
+            validation=definition.validation or {}, required=required, editable=editable,
+            default_value=default_value, page=mapping.page, show_on_portal=mapping.show_on_portal,
             show_condition=mapping.show_condition or {},
         ))
     return FormSchemaRead(ticket_type_id=ticket_type.id, name=ticket_type.name, pages=pages)
 
 
 def _template_role_key(user: User) -> str:
-    if user.profile.interface == "self_service":
-        return "Requester"
-    rights = user.profile.rights or {}
-    return "Administrator" if rights.get("*") is True or rights.get("ticket:view_all") is True else "Technician"
+    return field_role_for_user(user)
 
 
 async def _template_team(db: DbSession, team_id: int | None) -> TemplateTeamRead | None:
@@ -248,7 +279,8 @@ async def _template_prefill_for_user(
     allowed_keys = {
         definition.key
         for definition, mapping in fields
-        if role in mapping.visible_to_roles
+        if (role != "Requester" or definition.key in REQUESTER_FORM_FIELDS)
+        and role in mapping.visible_to_roles
         and role in mapping.editable_by_roles
         and (role != "Requester" or mapping.show_on_portal)
         and definition.key not in {"user", "organisation"}
@@ -274,7 +306,7 @@ async def browse_ticket_templates(
     limit: int = Query(default=20, ge=1, le=50),
     offset: int = Query(default=0, ge=0),
 ) -> list[TemplateListItem]:
-    requester = user.profile.interface == "self_service"
+    requester = (user.profile.rights or {}).get("ticket:own_only") is True
     if not requester:
         require_helpdesk(user)
     own_teams = select(GroupMember.group_id).join(
@@ -436,7 +468,7 @@ async def get_ticket_template(
     )
     if template is None:
         raise HTTPException(status_code=404, detail="Template not found")
-    requester = user.profile.interface == "self_service"
+    requester = (user.profile.rights or {}).get("ticket:own_only") is True
     if requester:
         ticket_type = await db.get(TicketTypeDefinition, template.ticket_type_id)
         if (
@@ -487,7 +519,7 @@ async def get_ticket_template(
 
 @router.get("/templates", response_model=list[TemplateRead])
 async def list_templates(user: CurrentUser, db: DbSession) -> list[TicketTemplate | dict[str, Any]]:
-    requester = user.profile.interface == "self_service"
+    requester = (user.profile.rights or {}).get("ticket:own_only") is True
     if not requester:
         require_helpdesk(user)
     statement = (

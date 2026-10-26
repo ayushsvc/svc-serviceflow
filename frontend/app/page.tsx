@@ -2,6 +2,7 @@
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import AssignPicker from "./components/AssignPicker";
+import RequesterTicketForm from "./components/RequesterTicketForm";
 import TemplatePicker from "./components/TemplatePicker";
 
 type TokenPair = { access_token: string; refresh_token: string };
@@ -27,6 +28,7 @@ type Ticket = {
   description: string;
   status: string;
   priority: number;
+  priority_label?: string | null;
   urgency?: number;
   impact?: number;
   opened_at: string;
@@ -49,6 +51,7 @@ type Group = { id: number; name: string };
 type TicketType = { id: number; name: string; itil_class: string; fields: Array<{ field_definition_id: number; key?: string; required: boolean; page: string }> };
 type FormField = { key: string; label: string; type: string; options: Record<string, unknown>; validation: Record<string, unknown>; required: boolean; editable: boolean; default_value: unknown; page: string; show_on_portal: boolean; show_condition: Record<string, unknown> };
 type FormSchema = { ticket_type_id: number; name: string; pages: Record<string, FormField[]> };
+type PriorityOption = { value: number; label: string };
 type AssignmentPreview = { team_name: string | null; agent_name: string | null; priority: number; sla: { sla_name: string | null; response_target: string | null; fix_target: string | null } };
 type TicketWorkflow = { id?: number; entity_id?: number; record_type?: string; states: string[]; transitions: Record<string, string[]>; approval_requirements: Record<string, number>; is_active: boolean };
 type WorkflowApproval = { id: number; record_type: string; record_id: number; transition_to: string; step: number; status: string; note: string | null; created_at: string };
@@ -152,6 +155,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("All tickets");
   const [priorityFilter, setPriorityFilter] = useState("All priorities");
+  const [priorityOptions, setPriorityOptions] = useState<PriorityOption[]>([]);
   const [filterOpen, setFilterOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [activeNav, setActiveNav] = useState("Tickets");
@@ -212,6 +216,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     || currentUser?.profile.rights?.["ticket:view_all"]
     || currentUser?.profile.rights?.["*"],
   );
+  const requesterAccess = Boolean(currentUser?.profile.rights?.["ticket:own_only"]);
   const draftKey = currentUser ? `svc-ticket-draft:${currentUser.id}` : null;
 
   const apiHeaders = { Authorization: `Bearer ${token.access_token}` };
@@ -228,9 +233,14 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     if (priorityFilter !== "All priorities") params.set("priority", priorityFilter);
     const response = await fetch(`/api/v1/tickets?${params.toString()}`, { headers: apiHeaders });
     if (!response.ok) { setError("Unable to load tickets."); return; }
-    const result = (await response.json()) as { items: Ticket[]; total: number };
+    const result = (await response.json()) as {
+      items: Ticket[];
+      total: number;
+      priority_options: PriorityOption[];
+    };
     setTickets(result.items);
     setListTotal(result.total);
+    setPriorityOptions(result.priority_options ?? []);
     if (queueAccess) {
       const queueResponse = await fetch("/api/v1/tickets/queue-counts", { headers: apiHeaders });
       if (queueResponse.ok) setQueueCounts(await queueResponse.json() as typeof queueCounts);
@@ -432,7 +442,11 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     setCreateError("Draft saved on this device.");
   }
   function applyTemplateValues(prefilled: Record<string, unknown>) {
-    setCustomFields((current) => ({ ...current, ...prefilled }));
+    setCustomFields((current) => ({
+      ...current,
+      ...prefilled,
+      ...(requesterAccess && current.priority != null ? { priority: current.priority } : {}),
+    }));
     if (typeof prefilled.summary === "string") setNewTitle(prefilled.summary);
     if (typeof prefilled.details === "string") setNewDescription(prefilled.details);
     if (prefilled.category !== undefined && prefilled.category !== null) setCategoryId(String(prefilled.category));
@@ -453,9 +467,43 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     event.preventDefault();
     setCreateError("");
     setUploadMessage("");
+    const title = requesterAccess ? String(customFields.summary ?? "") : newTitle;
+    const description = requesterAccess ? String(customFields.details ?? "") : newDescription;
+    const ticketFields = { ...customFields };
+    if (requesterAccess) {
+      delete ticketFields.attachments;
+      delete ticketFields.priority;
+      delete ticketFields.urgency;
+      delete ticketFields.impact;
+      delete ticketFields.user;
+      delete ticketFields.organisation;
+    }
     const response = await fetch("/api/v1/tickets", {
       method: "POST", headers: { "Content-Type": "application/json", ...apiHeaders },
-      body: JSON.stringify({ title: newTitle, description: newDescription, type: ticketTypes.find((item) => String(item.id) === ticketType)?.itil_class ?? "INCIDENT", ticket_type_id: Number(ticketType), urgency: Number(urgency), impact: Number(impact), category_id: categoryId ? Number(categoryId) : null, ...(selectedRequesterId ? { requester_id: selectedRequesterId } : {}), ...(assigneeId ? { assignee_id: Number(assigneeId) } : {}), custom_fields: { ...customFields, summary: newTitle, details: newDescription, user: selectedRequesterId ?? currentUser?.id, category: categoryId ? Number(categoryId) : undefined, urgency: Number(urgency), impact: Number(impact), agent: assigneeId ? Number(assigneeId) : undefined } }),
+      body: JSON.stringify({
+        title,
+        description,
+        type: ticketTypes.find((item) => String(item.id) === ticketType)?.itil_class ?? "INCIDENT",
+        ticket_type_id: Number(ticketType),
+        ...(requesterAccess
+          ? { priority: customFields.priority }
+          : { urgency: Number(urgency), impact: Number(impact) }),
+        ...(requesterAccess ? {} : { category_id: categoryId ? Number(categoryId) : null }),
+        ...(!requesterAccess && selectedRequesterId ? { requester_id: selectedRequesterId } : {}),
+        ...(!requesterAccess && assigneeId ? { assignee_id: Number(assigneeId) } : {}),
+        custom_fields: {
+          ...ticketFields,
+          summary: title,
+          details: description,
+          ...(!requesterAccess ? {
+            user: selectedRequesterId ?? currentUser?.id,
+            category: categoryId ? Number(categoryId) : undefined,
+            urgency: Number(urgency),
+            impact: Number(impact),
+            agent: assigneeId ? Number(assigneeId) : undefined,
+          } : {}),
+        },
+      }),
     });
     if (!response.ok) {
       setCreateError("Enter a title and a description before submitting.");
@@ -472,10 +520,13 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
       });
       if (!uploadResponse.ok) failedUploads += 1;
     }
-    setNewTitle(""); setNewDescription(""); setNewFiles([]); setRequesterSearch(""); setSelectedRequesterId(null); setImpact("3"); setUrgency("3"); setCategoryId(""); setAssigneeId(""); setCustomFields({});
+    const defaultFields = requesterAccess && formSchema
+      ? Object.fromEntries(Object.values(formSchema.pages).flat().filter((field) => field.default_value !== null).map((field) => [field.key, field.default_value]))
+      : {};
+    setNewTitle(""); setNewDescription(""); setNewFiles([]); setRequesterSearch(""); setSelectedRequesterId(null); setImpact("3"); setUrgency("3"); setCategoryId(""); setAssigneeId(""); setCustomFields(defaultFields);
     setUploadMessage(failedUploads ? `${failedUploads} attachment${failedUploads === 1 ? "" : "s"} could not be uploaded.` : "");
     if (submitAnother) {
-      setNewTitle(""); setNewDescription(""); setCustomFields({}); setNewFiles([]); setSubmitAnother(false);
+      setNewTitle(""); setNewDescription(""); setCustomFields(defaultFields); setNewFiles([]); setSubmitAnother(false);
     } else setShowCreate(false);
     await loadTickets();
     await selectTicket(ticket);
@@ -492,7 +543,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     if (column === "title") return <div className="ticket-cell"><strong>#{ticket.id} {ticket.requester_vip ? "★ " : ""}{ticket.flagged ? "⚑ " : ""}{ticket.requester_active === false ? "⚠ " : ""}{ticket.title}</strong><span>{ticket.description.slice(0, 62)}{ticket.description.length > 62 ? "…" : ""}</span></div>;
     if (column === "id") return `#${ticket.id}`;
     if (column === "status") return <span className={`status status-${ticket.status.toLowerCase()}`}><i />{statusLabels[ticket.status] ?? ticket.status}</span>;
-    if (column === "priority") return <span className={`priority priority-${ticket.priority}`}>{ticket.priority <= 2 ? "Low" : ticket.priority === 3 ? "Medium" : "High"} <b>{ticket.priority}</b></span>;
+    if (column === "priority") return <span className={`priority priority-${ticket.priority}`}>{ticket.priority_label ?? `Priority ${ticket.priority}`}{!requesterAccess && <b>{ticket.priority}</b>}</span>;
     if (column === "opened_at") return new Date(ticket.opened_at).toLocaleDateString();
     if (column === "requester_name") return ticket.requester_name ?? "—";
     if (column === "requester_active") return ticket.requester_active == null ? "—" : ticket.requester_active ? "Active" : "Inactive";
@@ -511,7 +562,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   }
   const openCount = tickets.filter((ticket) => !["SOLVED", "CLOSED"].includes(ticket.status)).length;
   const resolvedCount = tickets.filter((ticket) => ["SOLVED", "CLOSED"].includes(ticket.status)).length;
-  const highPriorityCount = tickets.filter((ticket) => ticket.priority >= 4).length;
+  const highPriorityCount = tickets.filter((ticket) => ticket.priority <= 2).length;
 
   return <div className="app-shell">
     {mobileNavOpen && <button className="mobile-nav-overlay" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
@@ -537,7 +588,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     <main className="main-canvas">
       <header className="topbar"><div className="topbar-leading"><button className="mobile-menu-button icon-button" aria-label="Open navigation" onClick={() => setMobileNavOpen(true)}><span /><span /><span /></button><div className="breadcrumb">Workspace <span>/</span> <strong>{activeNav}</strong></div></div><div className="topbar-actions"><button aria-label="Notifications" className="icon-button"><Icon name="bell" /><i /></button><button className="avatar avatar-indigo top-avatar">AD</button></div></header>
       <div className="page-content">
-        {activeNav === "Settings" ? <SettingsPanel currentUser={currentUser} adminToken={token} /> : activeNav === "Workflows" ? <WorkflowPanel token={token} /> : activeNav === "Approvals" ? <ApprovalsPanel token={token} currentUser={currentUser} /> : activeNav === "Overview" ? <OverviewPanel tickets={tickets} openCount={openCount} resolvedCount={resolvedCount} highPriorityCount={highPriorityCount} /> : activeNav === "People" ? <PeoplePanel currentUser={currentUser} requesters={requesters} agents={agents} /> : activeNav === "Knowledge base" ? <KnowledgePanel categories={categories} /> : activeNav === "Reports" ? <ReportsPanel tickets={tickets} /> : <>
+        {activeNav === "Settings" ? <SettingsPanel currentUser={currentUser} adminToken={token} /> : activeNav === "Workflows" ? <WorkflowPanel token={token} /> : activeNav === "Approvals" ? <ApprovalsPanel token={token} currentUser={currentUser} /> : activeNav === "Overview" ? <OverviewPanel tickets={tickets} openCount={openCount} resolvedCount={resolvedCount} highPriorityCount={highPriorityCount} /> : activeNav === "People" ? <PeoplePanel currentUser={currentUser} requesters={requesters} agents={agents} /> : activeNav === "Knowledge base" ? <KnowledgePanel categories={categories} /> : activeNav === "Reports" ? <ReportsPanel tickets={tickets} priorityOptions={priorityOptions} requester={requesterAccess} /> : <>
         <div className="page-heading"><div><p className="kicker">SERVICE OPERATIONS</p><h1>{activeNav === "Tickets" ? "Tickets" : activeNav}</h1><p className="subheading">{currentUser?.profile.interface === "self_service" ? "Report an incident or request a service, then track your tickets here." : queueAccess ? "Tickets assigned to you, your teams, or awaiting a technician." : "Manage, prioritize, and resolve requests across your organization."}</p></div><button className="primary-button" onClick={() => setShowCreate(true)}><span>+</span> Create ticket</button></div>
         <div className="metric-row"><div className="metric"><span className="metric-label">Open tickets</span><strong>{openCount}</strong><small className="metric-up">+12% <span>vs last week</span></small></div><div className="metric"><span className="metric-label">Awaiting response</span><strong>{tickets.filter((ticket) => ticket.status === "PENDING").length}</strong><small>Needs attention</small></div><div className="metric"><span className="metric-label">SLA compliance</span><strong>94.2%</strong><small className="metric-up">+2.4% <span>vs last month</span></small></div><div className="metric"><span className="metric-label">Avg. resolution</span><strong>6h 24m</strong><small>Across all tickets</small></div></div>
         <section className="table-card">
@@ -550,7 +601,26 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
             ] as const).map(([queue, label, count]) => <button key={queue} type="button" className={`secondary-button ${queueFilter === queue ? "button-active" : ""}`} aria-pressed={queueFilter === queue} onClick={() => { setQueueFilter(queue); setListPage(1); }}>{label} <b>{count}</b></button>)}
           </div>}
           <div className="team-counts" aria-label="Team ticket counts">{teamCounts.map((team) => <span className="team-count" key={team.team_id ?? "unassigned"}>Team {team.team_id ?? "Unassigned"} <b>{team.count}</b></span>)}</div>
-          <div className="table-toolbar"><div className="search-box"><Icon name="search" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tickets by ID, title, or keyword" /></div><div className="toolbar-actions"><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filter tickets"><option>All tickets</option><option>NEW</option><option>ASSIGNED</option><option>PENDING</option><option>SOLVED</option><option>CLOSED</option></select><div className="toolbar-menu-wrap"><button className={`filter-button ${filterOpen ? "button-active" : ""}`} onClick={() => { setFilterOpen((open) => !open); setMoreOpen(false); }}>Filter <span>{activeFilterCount}</span></button>{filterOpen && <div className="filter-popover"><label>Priority<select value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}><option>All priorities</option><option value="1">Low (1)</option><option value="2">Low (2)</option><option value="3">Medium (3)</option><option value="4">High (4)</option><option value="5">High (5)</option></select></label><button className="clear-button" onClick={clearFilters}>Clear filters</button></div>}</div><div className="toolbar-menu-wrap"><button className="more-button" aria-label="More ticket actions" aria-expanded={moreOpen} onClick={() => { setMoreOpen((open) => !open); setFilterOpen(false); }}>•••</button>{moreOpen && <div className="more-popover" role="menu"><button role="menuitem" onClick={() => { setMoreOpen(false); void loadTickets(); }}>Refresh tickets</button><button role="menuitem" onClick={clearFilters}>Clear all filters</button></div>}</div></div></div>
+          <div className="table-toolbar">
+            <div className="search-box"><Icon name="search" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tickets by ID, title, or keyword" /></div>
+            <div className="toolbar-actions">
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filter tickets"><option>All tickets</option><option>NEW</option><option>ASSIGNED</option><option>PENDING</option><option>SOLVED</option><option>CLOSED</option></select>
+              <div className="toolbar-menu-wrap">
+                <button className={`filter-button ${filterOpen ? "button-active" : ""}`} onClick={() => { setFilterOpen((open) => !open); setMoreOpen(false); }}>Filter <span>{activeFilterCount}</span></button>
+                {filterOpen && <div className="filter-popover">
+                  <label>Priority<select value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}>
+                    <option>All priorities</option>
+                    {priorityOptions.map(({ value, label }) => <option key={value} value={value}>{requesterAccess ? label : `${label} (${value})`}</option>)}
+                  </select></label>
+                  <button className="clear-button" onClick={clearFilters}>Clear filters</button>
+                </div>}
+              </div>
+              <div className="toolbar-menu-wrap">
+                <button className="more-button" aria-label="More ticket actions" aria-expanded={moreOpen} onClick={() => { setMoreOpen((open) => !open); setFilterOpen(false); }}>•••</button>
+                {moreOpen && <div className="more-popover" role="menu"><button role="menuitem" onClick={() => { setMoreOpen(false); void loadTickets(); }}>Refresh tickets</button><button role="menuitem" onClick={clearFilters}>Clear all filters</button></div>}
+              </div>
+            </div>
+          </div>
           <div className="list-controls"><label>Sort<select value={listSort} onChange={(event) => { setListSort(event.target.value); setListPage(1); }}><option value="opened_at">Opened</option><option value="priority">Priority</option><option value="status">Status</option><option value="title">Title</option></select></label><button className="sort-toggle" onClick={() => setListDirection((current) => current === "asc" ? "desc" : "asc")}>{listDirection === "asc" ? "Ascending" : "Descending"}</button><label>Page size<select value={listPageSize} onChange={(event) => { setListPageSize(Number(event.target.value)); setListPage(1); }}><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label></div>
           <div className="profile-control-panel" aria-label="Saved ticket profiles">
             <label>Saved profile<select value={activeListProfileId} onChange={(event) => applyListProfile(listProfiles.find((profile) => String(profile.id) === event.target.value))}><option value="">Current view</option>{listProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.kind === "filter" ? "Filter" : "Columns"} · {profile.name}{profile.is_default ? " (default)" : ""}</option>)}</select></label>
@@ -586,7 +656,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         onAssigned={onTicketAssigned}
       /> : null;
     })()}
-    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{statusLabels[selected.status] ?? selected.status}</span>{queueAccess && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}{canAssignTickets && <button className="secondary-button" onClick={() => setAssignmentPickerTicketId(selected.id)}>Assign</button>}</div><div className="assignment-summary"><span>Assignee: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span></div><div className="drawer-tabs"><button className="tab active">Activity</button><button className="tab">Details</button></div><div className="drawer-content"><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><form className="reply-box" onSubmit={addFollowup}><div className="reply-type"><span>Public reply</span><button type="button">⌄</button></div><textarea value={followup} onChange={(event) => setFollowup(event.target.value)} placeholder="Write a reply to the requester…" /><div className="reply-actions"><span>Visible to requester</span><button className="primary-button" type="submit">Send reply <Icon name="arrow" /></button></div></form><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>Employee</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div><div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div></dl></section></div></aside>}
+    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{statusLabels[selected.status] ?? selected.status}</span>{queueAccess && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}{canAssignTickets && <button className="secondary-button" onClick={() => setAssignmentPickerTicketId(selected.id)}>Assign</button>}</div><div className="assignment-summary"><span>Priority: <strong>{selected.priority_label ?? `Priority ${selected.priority}`}{requesterAccess ? "" : ` (${selected.priority})`}</strong></span><span>Assignee: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span></div><div className="drawer-tabs"><button className="tab active">Activity</button><button className="tab">Details</button></div><div className="drawer-content"><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><form className="reply-box" onSubmit={addFollowup}><div className="reply-type"><span>Public reply</span><button type="button">⌄</button></div><textarea value={followup} onChange={(event) => setFollowup(event.target.value)} placeholder="Write a reply to the requester…" /><div className="reply-actions"><span>Visible to requester</span><button className="primary-button" type="submit">Send reply <Icon name="arrow" /></button></div></form><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>Employee</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div><div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div></dl></section></div></aside>}
     {showCreate && (
       <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowCreate(false); }}>
         <form
@@ -603,68 +673,85 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
             <div><p className="kicker">NEW REQUEST</p><h2>Create a ticket</h2></div>
             <button type="button" className="icon-button" onClick={() => setShowCreate(false)} aria-label="Close"><Icon name="close" /></button>
           </div>
-          <label>
-            {currentUser?.profile.interface === "self_service" ? "What do you need?" : "Ticket type"}
-            <select value={ticketType} onChange={(event) => setTicketType(event.target.value)} required>
-              <option value="">Select a request type</option>
-              {ticketTypes.map((type) => <option key={type.id} value={type.id}>{type.itil_class === "INCIDENT" ? "Report an issue · Incident" : type.itil_class === "REQUEST" ? "Request a service · Service Request" : type.name}</option>)}
-            </select>
-            {currentUser?.profile.interface === "self_service" && <small className="form-help">Choose Incident for an interruption or fault. Choose Service Request for access, hardware, software, or another service.</small>}
-          </label>
-          <TemplatePicker
-            token={token.access_token}
-            ticketTypeId={ticketType}
-            currentValues={{ ...customFields, summary: newTitle, details: newDescription, category: categoryId || undefined, urgency, impact }}
-            hasExistingInput={Boolean(newTitle.trim() || newDescription.trim() || Object.values(customFields).some((value) => value !== "" && value != null))}
-            canManageTemplates={canManageTemplates}
-            onApply={applyTemplateValues}
-            onRestore={restoreTemplateValues}
-            onOpenSettings={() => setActiveNav("Settings")}
-          />
-          {currentUser?.profile.interface === "helpdesk" && (
-            <label>
-              Requester
-              <input
-                list="requester-options"
-                value={requesterSearch}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  setRequesterSearch(value);
-                  const match = requesters.find((requester) => `${requester.name} — ${requester.email}` === value);
-                  setSelectedRequesterId(match?.id ?? null);
-                }}
-                placeholder="Search by name or email"
+          {requesterAccess ? (
+            <RequesterTicketForm
+              token={token.access_token}
+              ticketTypes={ticketTypes}
+              ticketType={ticketType}
+              onTicketTypeChange={setTicketType}
+              schema={formSchema}
+              values={customFields}
+              onValuesChange={setCustomFields}
+              files={newFiles}
+              onFilesChange={setNewFiles}
+              canManageTemplates={canManageTemplates}
+              onApplyTemplate={applyTemplateValues}
+              onRestoreTemplate={restoreTemplateValues}
+              onOpenSettings={() => setActiveNav("Settings")}
+            />
+          ) : (
+            <>
+              <label>
+                Ticket type
+                <select value={ticketType} onChange={(event) => setTicketType(event.target.value)} required>
+                  <option value="">Select a request type</option>
+                  {ticketTypes.map((type) => <option key={type.id} value={type.id}>{type.itil_class === "INCIDENT" ? "Report an issue · Incident" : type.itil_class === "REQUEST" ? "Request a service · Service Request" : type.name}</option>)}
+                </select>
+              </label>
+              <TemplatePicker
+                token={token.access_token}
+                ticketTypeId={ticketType}
+                currentValues={{ ...customFields, summary: newTitle, details: newDescription, category: categoryId || undefined, urgency, impact }}
+                hasExistingInput={Boolean(newTitle.trim() || newDescription.trim() || Object.values(customFields).some((value) => value !== "" && value != null))}
+                canManageTemplates={canManageTemplates}
+                onApply={applyTemplateValues}
+                onRestore={restoreTemplateValues}
+                onOpenSettings={() => setActiveNav("Settings")}
               />
-              <datalist id="requester-options">{requesters.map((requester) => <option key={requester.id} value={`${requester.name} — ${requester.email}`} />)}</datalist>
-              {selectedRequesterId && (() => {
-                const requester = requesters.find((item) => item.id === selectedRequesterId);
-                return requester ? <span className="requester-card"><strong>{requester.name}</strong><small>{requester.email} · Organisation: current entity · Active requester</small><b aria-label="VIP requester">★</b></span> : null;
-              })()}
-            </label>
+              <label>
+                Requester
+                <input
+                  list="requester-options"
+                  value={requesterSearch}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setRequesterSearch(value);
+                    const match = requesters.find((requester) => `${requester.name} — ${requester.email}` === value);
+                    setSelectedRequesterId(match?.id ?? null);
+                  }}
+                  placeholder="Search by name or email"
+                />
+                <datalist id="requester-options">{requesters.map((requester) => <option key={requester.id} value={`${requester.name} — ${requester.email}`} />)}</datalist>
+                {selectedRequesterId && (() => {
+                  const requester = requesters.find((item) => item.id === selectedRequesterId);
+                  return requester ? <span className="requester-card"><strong>{requester.name}</strong><small>{requester.email} · Organisation: current entity · Active requester</small><b aria-label="VIP requester">★</b></span> : null;
+                })()}
+              </label>
+              <label>Summary<input value={newTitle} onChange={(event) => setNewTitle(event.target.value)} minLength={5} required placeholder="Summarize the issue" /></label>
+              <label>Description<textarea value={newDescription} onChange={(event) => setNewDescription(event.target.value)} minLength={10} required placeholder="Tell the support team what happened and what you need." /></label>
+              {formSchema
+                ? <DynamicFields schema={formSchema} values={customFields} onChange={(key, value) => setCustomFields((current) => ({ ...current, [key]: value }))} portal={false} />
+                : <p className="form-help">Loading the selected ticket form…</p>}
+              <label className="file-picker">
+                Attachments <span>Optional</span>
+                <span
+                  className="drop-zone"
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    setNewFiles((current) => [...current, ...Array.from(event.dataTransfer.files)]);
+                  }}
+                >
+                  <input type="file" accept=".pdf,.png,.jpg,.jpeg,.txt,application/pdf,image/png,image/jpeg,text/plain" multiple onChange={(event) => setNewFiles(Array.from(event.target.files ?? []))} />
+                  <strong>Drop files here or choose files</strong><small>PDF, PNG, JPG, or TXT. Up to 10 MB per file.</small>
+                </span>
+              </label>
+              {newFiles.length > 0 && <div className="file-list">{newFiles.map((file) => <span key={`${file.name}-${file.size}`}>{file.name}<b>{formatFileSize(file.size)}</b></span>)}</div>}
+            </>
           )}
-          <label>Summary<input value={newTitle} onChange={(event) => setNewTitle(event.target.value)} minLength={5} required placeholder="Summarize the issue" /></label>
-          <label>Description<textarea value={newDescription} onChange={(event) => setNewDescription(event.target.value)} minLength={10} required placeholder="Tell the support team what happened and what you need." /></label>
-          {formSchema
-            ? <DynamicFields schema={formSchema} values={customFields} onChange={(key, value) => setCustomFields((current) => ({ ...current, [key]: value }))} portal={currentUser?.profile.interface === "self_service"} />
-            : <p className="form-help">Loading the selected ticket form…</p>}
-          <label className="file-picker">
-            Attachments <span>Optional</span>
-            <span
-              className="drop-zone"
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                event.preventDefault();
-                setNewFiles((current) => [...current, ...Array.from(event.dataTransfer.files)]);
-              }}
-            >
-              <input type="file" accept=".pdf,.png,.jpg,.jpeg,.txt,application/pdf,image/png,image/jpeg,text/plain" multiple onChange={(event) => setNewFiles(Array.from(event.target.files ?? []))} />
-              <strong>Drop files here or choose files</strong><small>PDF, PNG, JPG, or TXT. Up to 10 MB per file.</small>
-            </span>
-          </label>
-          {newFiles.length > 0 && <div className="file-list">{newFiles.map((file) => <span key={`${file.name}-${file.size}`}>{file.name}<b>{formatFileSize(file.size)}</b></span>)}</div>}
           {createError && <p className="error">{createError}</p>}
           {uploadMessage && <p className="error">{uploadMessage}</p>}
-          <aside className="new-ticket-sidebar" aria-label="Ticket preview">
+          {!requesterAccess && <aside className="new-ticket-sidebar" aria-label="Ticket preview">
             <p className="kicker">LIVE ROUTING</p>
             <div className={`priority-preview priority-${assignmentPreview?.priority ?? 3}`}>Priority {assignmentPreview?.priority ?? "—"}</div>
             <dl>
@@ -676,7 +763,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
             </dl>
             <p className="kicker">KNOWLEDGE SUGGESTIONS</p>
             <small>{newTitle.trim() ? "Search suggestions will appear as knowledge articles are connected to this summary." : "Start typing a Summary to see suggested articles."}</small>
-          </aside>
+          </aside>}
           <div className="modal-actions">
             <label className="checkbox"><input type="checkbox" checked={submitAnother} onChange={(event) => setSubmitAnother(event.target.checked)} /> Create another</label>
             <button type="button" className="secondary-button" onClick={() => { if (!newTitle && !newDescription || window.confirm("Discard this ticket draft?")) setShowCreate(false); }}>Cancel</button>
@@ -691,7 +778,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
 
 function OverviewPanel({ tickets, openCount, resolvedCount, highPriorityCount }: { tickets: Ticket[]; openCount: number; resolvedCount: number; highPriorityCount: number }) {
   const statusCounts = tickets.reduce<Record<string, number>>((counts, ticket) => ({ ...counts, [ticket.status]: (counts[ticket.status] ?? 0) + 1 }), {});
-  return <section className="section-panel"><div className="page-heading"><div><p className="kicker">SERVICE OPERATIONS</p><h1>Workspace overview</h1><p className="subheading">Monitor service health and the work requiring attention.</p></div></div><div className="metric-row"><div className="metric"><span className="metric-label">Open tickets</span><strong>{openCount}</strong><small>Needs attention</small></div><div className="metric"><span className="metric-label">Resolved tickets</span><strong>{resolvedCount}</strong><small>Current workspace</small></div><div className="metric"><span className="metric-label">High priority</span><strong>{highPriorityCount}</strong><small>Priority 4 or 5</small></div><div className="metric"><span className="metric-label">Total requests</span><strong>{tickets.length}</strong><small>All visible tickets</small></div></div><div className="panel-grid"><section className="table-card panel-card"><div className="panel-card-heading"><h2>Ticket status</h2><span>Live queue</span></div>{Object.entries(statusCounts).map(([status, count]) => <div className="bar-row" key={status}><span>{statusLabels[status] ?? status}</span><b><i style={{ width: `${tickets.length ? Math.max(8, (count / tickets.length) * 100) : 0}%` }} /></b><strong>{count}</strong></div>)}</section><section className="table-card panel-card"><div className="panel-card-heading"><h2>Recent activity</h2><span>Latest requests</span></div>{tickets.slice(0, 5).map((ticket) => <div className="activity-row" key={ticket.id}><span className={`status status-${ticket.status.toLowerCase()}`}><i />#{ticket.id}</span><strong>{ticket.title}</strong><small>{statusLabels[ticket.status] ?? ticket.status}</small></div>)}</section></div></section>;
+  return <section className="section-panel"><div className="page-heading"><div><p className="kicker">SERVICE OPERATIONS</p><h1>Workspace overview</h1><p className="subheading">Monitor service health and the work requiring attention.</p></div></div><div className="metric-row"><div className="metric"><span className="metric-label">Open tickets</span><strong>{openCount}</strong><small>Needs attention</small></div><div className="metric"><span className="metric-label">Resolved tickets</span><strong>{resolvedCount}</strong><small>Current workspace</small></div><div className="metric"><span className="metric-label">High priority</span><strong>{highPriorityCount}</strong><small>Priority 1 or 2</small></div><div className="metric"><span className="metric-label">Total requests</span><strong>{tickets.length}</strong><small>All visible tickets</small></div></div><div className="panel-grid"><section className="table-card panel-card"><div className="panel-card-heading"><h2>Ticket status</h2><span>Live queue</span></div>{Object.entries(statusCounts).map(([status, count]) => <div className="bar-row" key={status}><span>{statusLabels[status] ?? status}</span><b><i style={{ width: `${tickets.length ? Math.max(8, (count / tickets.length) * 100) : 0}%` }} /></b><strong>{count}</strong></div>)}</section><section className="table-card panel-card"><div className="panel-card-heading"><h2>Recent activity</h2><span>Latest requests</span></div>{tickets.slice(0, 5).map((ticket) => <div className="activity-row" key={ticket.id}><span className={`status status-${ticket.status.toLowerCase()}`}><i />#{ticket.id}</span><strong>{ticket.title}</strong><small>{statusLabels[ticket.status] ?? ticket.status}</small></div>)}</section></div></section>;
 }
 
 function PeoplePanel({ currentUser, requesters, agents }: { currentUser: CurrentUser | null; requesters: Requester[]; agents: Requester[] }) {
@@ -703,9 +790,19 @@ function KnowledgePanel({ categories }: { categories: Category[] }) {
   return <section className="section-panel"><div className="page-heading"><div><p className="kicker">SELF SERVICE</p><h1>Knowledge base</h1><p className="subheading">Give employees guided answers before they raise a request.</p></div><button className="secondary-button">Search articles</button></div><div className="knowledge-grid"><section className="table-card panel-card"><div className="panel-card-heading"><h2>Browse categories</h2><span>{categories.length} categories</span></div>{categories.length ? categories.map((category) => <div className="knowledge-row" key={category.id}><span className="avatar avatar-indigo"><Icon name="book" /></span><div><strong>{category.name}</strong><small>Service articles and known solutions</small></div><span>→</span></div>) : <div className="empty-table"><strong>No categories configured</strong><span>Administrators can add knowledge categories from Settings.</span></div>}</section><section className="knowledge-callout"><p className="kicker">QUICK HELP</p><h2>Find an answer faster</h2><p>Search for a known solution before creating a new ticket.</p><button className="primary-button">Browse solutions</button></section></div></section>;
 }
 
-function ReportsPanel({ tickets }: { tickets: Ticket[] }) {
-  const priorities = [1, 2, 3, 4, 5].map((priority) => ({ priority, count: tickets.filter((ticket) => ticket.priority === priority).length }));
-  return <section className="section-panel"><div className="page-heading"><div><p className="kicker">SERVICE ANALYTICS</p><h1>Reports</h1><p className="subheading">Understand volume, priority, and workload across visible tickets.</p></div><button className="secondary-button">Export report</button></div><div className="metric-row"><div className="metric"><span className="metric-label">Ticket volume</span><strong>{tickets.length}</strong><small>Visible tickets</small></div><div className="metric"><span className="metric-label">SLA due</span><strong>{tickets.filter((ticket) => ticket.ttr_due_at).length}</strong><small>Tickets with deadlines</small></div><div className="metric"><span className="metric-label">Unassigned</span><strong>{tickets.filter((ticket) => !ticket.assignee_id).length}</strong><small>Awaiting ownership</small></div><div className="metric"><span className="metric-label">Completion</span><strong>{tickets.length ? `${Math.round((tickets.filter((ticket) => ["SOLVED", "CLOSED"].includes(ticket.status)).length / tickets.length) * 100)}%` : "0%"}</strong><small>Solved or closed</small></div></div><section className="table-card report-card"><div className="panel-card-heading"><h2>Tickets by priority</h2><span>Current queue</span></div>{priorities.map(({ priority, count }) => <div className="bar-row" key={priority}><span>Priority {priority}</span><b><i style={{ width: `${tickets.length ? Math.max(count ? 8 : 0, (count / tickets.length) * 100) : 0}%` }} /></b><strong>{count}</strong></div>)}</section></section>;
+function ReportsPanel({ tickets, priorityOptions, requester }: { tickets: Ticket[]; priorityOptions: PriorityOption[]; requester: boolean }) {
+  const priorities = requester
+    ? [
+      { label: "Critical", values: [1] },
+      { label: "High", values: [2] },
+      { label: "Medium", values: [3] },
+      { label: "Low", values: [4, 5] },
+    ]
+    : priorityOptions.map(({ value, label }) => ({ label: `${label} (${value})`, values: [value] }));
+  return <section className="section-panel"><div className="page-heading"><div><p className="kicker">SERVICE ANALYTICS</p><h1>Reports</h1><p className="subheading">Understand volume, priority, and workload across visible tickets.</p></div><button className="secondary-button">Export report</button></div><div className="metric-row"><div className="metric"><span className="metric-label">Ticket volume</span><strong>{tickets.length}</strong><small>Visible tickets</small></div><div className="metric"><span className="metric-label">SLA due</span><strong>{tickets.filter((ticket) => ticket.ttr_due_at).length}</strong><small>Tickets with deadlines</small></div><div className="metric"><span className="metric-label">Unassigned</span><strong>{tickets.filter((ticket) => !ticket.assignee_id).length}</strong><small>Awaiting ownership</small></div><div className="metric"><span className="metric-label">Completion</span><strong>{tickets.length ? `${Math.round((tickets.filter((ticket) => ["SOLVED", "CLOSED"].includes(ticket.status)).length / tickets.length) * 100)}%` : "0%"}</strong><small>Solved or closed</small></div></div><section className="table-card report-card"><div className="panel-card-heading"><h2>Tickets by priority</h2><span>Current queue</span></div>{priorities.map(({ label, values }) => {
+    const count = tickets.filter((ticket) => values.includes(ticket.priority)).length;
+    return <div className="bar-row" key={label}><span>{label}</span><b><i style={{ width: `${tickets.length ? Math.max(count ? 8 : 0, (count / tickets.length) * 100) : 0}%` }} /></b><strong>{count}</strong></div>;
+  })}</section></section>;
 }
 
 function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser | null; adminToken: TokenPair }) {

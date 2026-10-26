@@ -45,13 +45,13 @@ NOTIFICATION_TEMPLATES = [
 ]
 ALL_ROLES = ["Administrator", "Technician", "Requester"]
 HELPDESK_ROLES = ["Administrator", "Technician"]
-PORTAL_EDITABLE_FIELDS = {"summary", "details", "category", "urgency", "impact"}
+PORTAL_EDITABLE_FIELDS = {"summary", "details", "attachments", "priority"}
 SERVER_DERIVED_FIELDS = {"user", "organisation"}
 ADMIN_TECHNICIAN_FIELDS = {
     "priority", "team", "agent", "source", "asset", "sla", "due_date", "start_date",
     "followup_date", "time_estimate", "tags", "cc", "parent_ticket", "related_tickets", "flag",
+    "urgency", "impact", "category",
 }
-ORIGINAL_REQUESTER_EDITABLE_FIELDS = {"summary", "details", "user", "organisation", "category"}
 DEFAULT_TICKET_TEMPLATES = {
     "INCIDENT": [
         ("Cannot log in / password reset", "Get help restoring account access or resetting a password."),
@@ -241,6 +241,46 @@ async def seed_profile_rights(profiles: dict[str, Profile]) -> list[str]:
 
 
 async def seed_ticket_type_field_defaults(db: AsyncSession) -> list[str]:
+    attachments = await db.scalar(select(FieldDefinition).where(FieldDefinition.key == "attachments"))
+    if attachments is None:
+        attachments = FieldDefinition(
+            key="attachments",
+            label="Attachments",
+            type="text",
+            options={"widget": "attachments"},
+            is_system=True,
+        )
+        db.add(attachments)
+        await db.flush()
+
+    ticket_types = list(
+        (
+            await db.scalars(
+                select(TicketTypeDefinition).where(
+                    TicketTypeDefinition.is_active.is_(True),
+                    TicketTypeDefinition.itil_class.in_(("INCIDENT", "REQUEST")),
+                )
+            )
+        ).all()
+    )
+    changed: list[str] = []
+    for ticket_type in ticket_types:
+        mapping = await db.get(TicketTypeField, (ticket_type.id, attachments.id))
+        if mapping is None:
+            db.add(
+                TicketTypeField(
+                    ticket_type_id=ticket_type.id,
+                    field_definition_id=attachments.id,
+                    order=1000,
+                    page="details",
+                    required=False,
+                    visible_to_roles=ALL_ROLES,
+                    editable_by_roles=ALL_ROLES,
+                    show_on_portal=True,
+                )
+            )
+            changed.append(f"{ticket_type.name}.attachments (added)")
+
     rows = (
         await db.execute(
             select(TicketTypeDefinition, TicketTypeField, FieldDefinition)
@@ -249,42 +289,42 @@ async def seed_ticket_type_field_defaults(db: AsyncSession) -> list[str]:
             .where(TicketTypeDefinition.is_active.is_(True))
         )
     ).all()
-    changed = []
-    original_visible = ALL_ROLES
+    migration_default = (tuple(ALL_ROLES), tuple(HELPDESK_ROLES), True)
+    previously_seeded_defaults = {
+        "summary": (tuple(ALL_ROLES), tuple(ALL_ROLES), True),
+        "details": (tuple(ALL_ROLES), tuple(ALL_ROLES), True),
+        "category": (tuple(ALL_ROLES), tuple(ALL_ROLES), True),
+        "urgency": (tuple(ALL_ROLES), tuple(ALL_ROLES), True),
+        "impact": (tuple(ALL_ROLES), tuple(ALL_ROLES), True),
+        "priority": (tuple(ALL_ROLES), tuple(HELPDESK_ROLES), False),
+        "user": (tuple(HELPDESK_ROLES), tuple(HELPDESK_ROLES), False),
+        "organisation": (tuple(HELPDESK_ROLES), tuple(HELPDESK_ROLES), False),
+    }
     for ticket_type, mapping, definition in rows:
-        if definition.key not in (
-            PORTAL_EDITABLE_FIELDS | SERVER_DERIVED_FIELDS | ADMIN_TECHNICIAN_FIELDS
-        ):
+        key = definition.key
+        if key not in (PORTAL_EDITABLE_FIELDS | SERVER_DERIVED_FIELDS | ADMIN_TECHNICIAN_FIELDS):
             continue
-        expected_editable = (
-            ALL_ROLES
-            if definition.key in ORIGINAL_REQUESTER_EDITABLE_FIELDS
-            else HELPDESK_ROLES
+        portal_fields = PORTAL_EDITABLE_FIELDS if ticket_type.itil_class in {"INCIDENT", "REQUEST"} else set()
+        visible_to_roles = ALL_ROLES if key in portal_fields else HELPDESK_ROLES
+        editable_by_roles = ALL_ROLES if key in portal_fields else HELPDESK_ROLES
+        show_on_portal = key in portal_fields
+        current = (
+            tuple(mapping.visible_to_roles),
+            tuple(mapping.editable_by_roles),
+            mapping.show_on_portal,
         )
-        if (
-            mapping.visible_to_roles != original_visible
-            or mapping.editable_by_roles != expected_editable
-            or not mapping.show_on_portal
-        ):
+        target = (tuple(visible_to_roles), tuple(editable_by_roles), show_on_portal)
+        if current == target:
             continue
-
-        visible_to_roles = (
-            HELPDESK_ROLES if definition.key in SERVER_DERIVED_FIELDS else ALL_ROLES
-        )
-        editable_by_roles = (
-            ALL_ROLES if definition.key in PORTAL_EDITABLE_FIELDS else HELPDESK_ROLES
-        )
-        show_on_portal = definition.key in PORTAL_EDITABLE_FIELDS
-        if (
-            mapping.visible_to_roles == visible_to_roles
-            and mapping.editable_by_roles == editable_by_roles
-            and mapping.show_on_portal == show_on_portal
-        ):
+        legacy_defaults = {migration_default}
+        if key in previously_seeded_defaults:
+            legacy_defaults.add(previously_seeded_defaults[key])
+        if current not in legacy_defaults:
             continue
         mapping.visible_to_roles = visible_to_roles
         mapping.editable_by_roles = editable_by_roles
         mapping.show_on_portal = show_on_portal
-        changed.append(f"{ticket_type.name}.{definition.key}")
+        changed.append(f"{ticket_type.name}.{key}")
     return changed
 
 

@@ -377,8 +377,7 @@ async def test_live_ticket_forms_are_role_filtered_and_requester_hidden_fields_a
         forms[role] = {field["key"] for field in fields}
 
     assert len({len(keys) for keys in forms.values()}) > 1
-    assert forms["Requester"] <= {"summary", "details", "category", "urgency", "impact"}
-    assert {"summary", "details", "category", "urgency", "impact"} <= forms["Requester"]
+    assert forms["Requester"] == {"summary", "details", "attachments", "priority"}
     assert {"team", "agent", "sla", "flag", "source", "asset"} <= forms["Technician"]
     assert forms["Technician"] <= forms["Administrator"]
 
@@ -470,12 +469,16 @@ async def test_field_seed_updates_only_original_defaults_and_is_idempotent(step5
             await db.flush()
 
             changed = await seed_ticket_type_field_defaults(db)
-            assert set(changed) == {f"{ticket_type.name}.source", f"{ticket_type.name}.urgency"}
-            assert source_mapping.visible_to_roles == ["Administrator", "Technician", "Requester"]
+            assert set(changed) == {
+                f"{ticket_type.name}.source",
+                f"{ticket_type.name}.urgency",
+                f"{ticket_type.name}.attachments (added)",
+            }
+            assert source_mapping.visible_to_roles == ["Administrator", "Technician"]
             assert source_mapping.editable_by_roles == ["Administrator", "Technician"]
             assert source_mapping.show_on_portal is False
-            assert urgency_mapping.editable_by_roles == ["Administrator", "Technician", "Requester"]
-            assert urgency_mapping.show_on_portal is True
+            assert urgency_mapping.editable_by_roles == ["Administrator", "Technician"]
+            assert urgency_mapping.show_on_portal is False
             assert customized_mapping.visible_to_roles == ["Administrator"]
             assert customized_mapping.editable_by_roles == ["Administrator"]
             assert customized_mapping.show_on_portal is False

@@ -31,8 +31,8 @@ from app.schemas_tickets import TicketBulkUpdate
 from app.services.audit import record_audit
 from app.services.automation import calculate_sla_deadlines, conditions_match
 from app.services.content import sanitize_rich_text
-from app.services.field_engine import store_field_values, validate_custom_fields
-from app.services.tickets import calculate_priority, transition_status
+from app.services.field_engine import field_role_for_user, get_type_fields, store_field_values, validate_custom_fields
+from app.services.tickets import calculate_priority, priority_urgency_impact, transition_status
 from app.workers.tasks import send_ticket_notification, send_user_ticket_notification
 
 BULK_RATE_LIMIT = 20
@@ -133,6 +133,25 @@ async def _apply_status(
         values["closed_at"] = datetime.now(UTC)
 
 
+async def _apply_priority_sla(
+    db: AsyncSession,
+    ticket: Ticket,
+    user: User,
+    priority: int,
+) -> None:
+    entity_name = await db.scalar(select(Entity.name).where(Entity.id == user.entity_id))
+    sla = await db.scalar(
+        select(SLA).where(
+            SLA.entity_id == user.entity_id,
+            SLA.name == f"{entity_name} Priority {priority} SLA",
+            SLA.is_active.is_(True),
+        )
+    )
+    if sla is not None:
+        ticket.sla_id = sla.id
+        calculate_sla_deadlines(ticket, sla.tto_minutes, sla.ttr_minutes, sla.calendar)
+
+
 async def apply_ticket_update(
     db: AsyncSession,
     ticket: Ticket,
@@ -188,6 +207,8 @@ async def apply_ticket_update(
         "urgency",
         "impact",
         "priority",
+        "ticket_type_id",
+        "type",
         "category_id",
         "assignee_id",
         "flagged",
@@ -196,6 +217,7 @@ async def apply_ticket_update(
     original_values = {field: getattr(ticket, field) for field in tracked_fields}
     original_custom_fields = dict(ticket.custom_fields or {})
     changes = dict(values)
+    explicit_priority = changes.get("priority") if "priority" in changes else None
     if "assignee_id" in changes and changes["assignee_id"] != ticket.assignee_id:
         if changes["assignee_id"] is None and ticket.assignee_id is not None:
             changes.setdefault("status", "NEW")
@@ -206,14 +228,39 @@ async def apply_ticket_update(
     if "ticket_type_id" in changes:
         if "sla" in changes.get("custom_fields", {}) and not has_right(user, "override_sla"):
             raise HTTPException(status_code=403, detail="SLA override permission required")
+        new_type, new_fields = await get_type_fields(db, changes["ticket_type_id"], user.entity_id)
+        new_field_keys = {definition.key for definition, _ in new_fields}
+        retained_fields = {
+            key: value
+            for key, value in {
+                **original_custom_fields,
+                "summary": ticket.title,
+                "details": ticket.description,
+                "user": ticket.requester_id,
+                "organisation": ticket.entity_id,
+            }.items()
+            if key in new_field_keys and key not in {"user", "organisation"}
+        }
+        retained_fields.update(changes.get("custom_fields", {}))
         changes["custom_fields"] = await validate_custom_fields(
-            db, changes["ticket_type_id"], user.entity_id, user.profile.name, changes.get("custom_fields", {})
+            db,
+            changes["ticket_type_id"],
+            user.entity_id,
+            field_role_for_user(user),
+            retained_fields,
+            trusted_values={"user": ticket.requester_id, "organisation": ticket.entity_id},
         )
+        changes["type"] = new_type.itil_class
     elif "custom_fields" in changes and ticket.ticket_type_id is not None:
         if "sla" in changes["custom_fields"] and not has_right(user, "override_sla"):
             raise HTTPException(status_code=403, detail="SLA override permission required")
         changes["custom_fields"] = await validate_custom_fields(
-            db, ticket.ticket_type_id, user.entity_id, user.profile.name, changes["custom_fields"], ticket.custom_fields
+            db,
+            ticket.ticket_type_id,
+            user.entity_id,
+            field_role_for_user(user),
+            changes["custom_fields"],
+            ticket.custom_fields,
         )
     if "category_id" in changes and changes["category_id"] is not None:
         from app.models import Category
@@ -267,7 +314,9 @@ async def apply_ticket_update(
     if "status" in changes:
         await _apply_status(db, ticket, user, changes)
 
-    if "urgency" in changes or "impact" in changes:
+    if explicit_priority is not None:
+        changes["urgency"], changes["impact"] = priority_urgency_impact(explicit_priority)
+    elif "urgency" in changes or "impact" in changes:
         matrix = await db.scalar(select(PriorityMatrix).where(PriorityMatrix.entity_id == user.entity_id))
         changes["priority"] = (
             calculate_priority(changes.get("urgency", ticket.urgency), changes.get("impact", ticket.impact))
@@ -275,19 +324,8 @@ async def apply_ticket_update(
             else matrix.matrix[changes.get("urgency", ticket.urgency) - 1][changes.get("impact", ticket.impact) - 1]
         )
     if "priority" in changes and changes["priority"] != ticket.priority:
-        entity_name = await db.scalar(select(Entity.name).where(Entity.id == user.entity_id))
-        sla = await db.scalar(
-            select(SLA).where(
-                SLA.entity_id == user.entity_id,
-                SLA.name == f"{entity_name} Priority {changes['priority']} SLA",
-                SLA.is_active.is_(True),
-            )
-        )
-        if sla is not None:
-            ticket.sla_id = sla.id
-            calculate_sla_deadlines(ticket, sla.tto_minutes, sla.ttr_minutes, sla.calendar)
+        await _apply_priority_sla(db, ticket, user, changes["priority"])
     custom_fields = changes.pop("custom_fields", None)
-    changes.pop("ticket_type_id", None)
     team_id = changes.pop("team_id", None) if "team_id" in changes else None
     for key, value in changes.items():
         setattr(ticket, key, value)
@@ -340,6 +378,12 @@ async def apply_ticket_update(
                 if sla:
                     ticket.sla_id = sla.id
                     calculate_sla_deadlines(ticket, sla.tto_minutes, sla.ttr_minutes, sla.calendar)
+
+    if explicit_priority is not None:
+        ticket.priority = explicit_priority
+        ticket.urgency, ticket.impact = priority_urgency_impact(explicit_priority)
+        if explicit_priority != original_values["priority"]:
+            await _apply_priority_sla(db, ticket, user, explicit_priority)
 
     await db.flush()
     if ticket.assignee_id is not None and visibility_scope_factory is not None:

@@ -5,10 +5,20 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import FieldDefinition, Ticket, TicketFieldValue, TicketTypeDefinition, TicketTypeField
+from app.models import FieldDefinition, Ticket, TicketFieldValue, TicketTypeDefinition, TicketTypeField, User
 from app.services.content import sanitize_rich_text
 
 MAX_CONDITION_DEPTH = 5
+REQUESTER_FORM_FIELDS = frozenset({"summary", "details", "attachments", "priority"})
+
+
+def field_role_for_user(user: User) -> str:
+    rights = user.profile.rights or {}
+    if rights.get("*") is True or rights.get("ticket:view_all") is True:
+        return "Administrator"
+    if rights.get("ticket:own_only") is True:
+        return "Requester"
+    return "Technician"
 
 
 def validate_condition(condition: Any, depth: int = 0) -> None:

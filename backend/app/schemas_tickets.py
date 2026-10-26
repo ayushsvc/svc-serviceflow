@@ -40,8 +40,9 @@ class TicketCreate(BaseModel):
     title: str = Field(min_length=5, max_length=240)
     description: str = Field(min_length=10, max_length=30000)
     type: str = Field(default="INCIDENT", pattern="^(INCIDENT|REQUEST|PROBLEM|PROJECT|FILE_SHARE|ADMIN_ACCESS|VPN_ACCESS)$")
-    urgency: int = Field(default=3, ge=1, le=5)
-    impact: int = Field(default=3, ge=1, le=5)
+    urgency: StrictInt | None = Field(default=None, ge=1, le=5)
+    impact: StrictInt | None = Field(default=None, ge=1, le=5)
+    priority: StrictInt | Literal["low", "medium", "high", "critical"] | None = None
     category_id: int | None = None
     sla_id: int | None = Field(default=None, gt=0)
     requester_id: int | None = Field(default=None, gt=0)
@@ -62,14 +63,14 @@ class TicketUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=5, max_length=240)
     description: str | None = Field(default=None, min_length=10, max_length=30000)
     status: str | None = None
-    urgency: int | None = Field(default=None, ge=1, le=5)
-    impact: int | None = Field(default=None, ge=1, le=5)
+    urgency: StrictInt | None = Field(default=None, ge=1, le=5)
+    impact: StrictInt | None = Field(default=None, ge=1, le=5)
     category_id: int | None = None
     assignee_id: int | None = None
     team_id: int | None = None
-    priority: int | None = Field(default=None, ge=1, le=5)
+    priority: StrictInt | None = Field(default=None, ge=1, le=5)
     flagged: bool | None = None
-    ticket_type_id: int | None = Field(default=None, gt=0)
+    ticket_type_id: StrictInt | None = Field(default=None, gt=0)
     custom_fields: dict[str, Any] | None = None
 
 
@@ -178,6 +179,7 @@ class TicketRead(BaseModel):
     urgency: int
     impact: int
     priority: int
+    priority_label: str | None = None
     category_id: int | None
     entity_id: int
     source: str
@@ -212,6 +214,7 @@ class TicketListResponse(BaseModel):
     page_size: int
     total: int
     pages: int
+    priority_options: list[dict[str, int | str]] = Field(default_factory=list)
 
 
 class ListProfileCreate(BaseModel):

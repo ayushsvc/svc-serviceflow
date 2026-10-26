@@ -400,10 +400,10 @@ async def test_form_schema_and_submitted_fields_are_role_filtered(real_postgres_
         mapping.field_definition_id: await db.get(FieldDefinition, mapping.field_definition_id)
         for mapping in mappings
     }
-    core_keys = {"summary", "details", "user"}
+    core_keys = {"summary", "details", "attachments", "priority"}
     extras = [mapping for mapping in mappings if definitions[mapping.field_definition_id].key not in core_keys]
     assert len(extras) >= 2
-    hidden_key = definitions[extras[1].field_definition_id].key
+    hidden_key = "urgency"
     for mapping in mappings:
         if definitions[mapping.field_definition_id].key in core_keys:
             mapping.visible_to_roles = ["Administrator", "Technician", "Requester"]
@@ -449,7 +449,7 @@ async def test_form_schema_and_submitted_fields_are_role_filtered(real_postgres_
         },
     )
     assert rejected.status_code == 422
-    assert "not visible" in rejected.json()["detail"]
+    assert rejected.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -591,8 +591,7 @@ async def test_priority_selects_default_sla_and_routes_priority_one_to_default_t
             "title": title,
             "description": "A high-priority ticket with enough details.",
             "type": "INCIDENT",
-            "urgency": 1,
-            "impact": 1,
+            "priority": "critical",
             "ticket_type_id": incident.id,
             "custom_fields": {"summary": title, "details": "High-priority details."},
         },

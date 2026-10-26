@@ -13,10 +13,10 @@ from app.deps import CurrentUser, DbSession, require_admin, require_helpdesk
 from app.models import AuditLog, BusinessRule, Category, Entity, Group, GroupMember, ListProfile, PriorityMatrix, Profile, SLA, Ticket, TicketActor, TicketDocument, TicketFollowup, TicketLink, TicketSolution, TicketTask, TicketTypeDefinition, TicketWorkflow, User, WorkflowApproval
 from app.schemas_tickets import ActorCreate, ActorRead, AssignableUserRead, CategoryCreate, CategoryRead, FollowupCreate, FollowupRead, GroupRead, LinkCreate, LinkRead, ListProfileCreate, ListProfileRead, ListProfileUpdate, RequesterRead, SolutionCreate, SolutionRead, TaskCreate, TaskRead, TicketAssignRequest, TicketAssignResult, TicketBulkResult, TicketBulkUpdate, TicketCreate, TicketListResponse, TicketRead, TicketUpdate
 from app.services.automation import calculate_sla_deadlines, conditions_match
-from app.services.tickets import calculate_priority, transition_status
+from app.services.tickets import calculate_priority, priority_label, priority_options, priority_urgency_impact, requester_priority_value, transition_status
 from app.workers.tasks import send_ticket_notification
 from app.services.audit import record_audit
-from app.services.field_engine import store_field_values, validate_custom_fields
+from app.services.field_engine import REQUESTER_FORM_FIELDS, field_role_for_user, store_field_values, validate_custom_fields
 from app.services.content import sanitize_rich_text
 from app.services.bulk_tickets import apply_ticket_update, bulk_update_tickets as run_bulk_ticket_update, dispatch_ticket_update_effects
 
@@ -38,6 +38,13 @@ def can_assign_tickets(user: User) -> bool:
     return any(
         has_profile_right(user, right)
         for right in ("ticket:assign_any", "ticket:bulk_edit", "ticket:edit", "ticket:update", "ticket:assign")
+    )
+
+
+def can_update_tickets(user: User) -> bool:
+    return any(
+        has_profile_right(user, right)
+        for right in ("ticket:edit", "ticket:update", "tickets:update", "ticket:bulk_edit")
     )
 
 
@@ -107,6 +114,19 @@ async def get_scoped_ticket(ticket_id: int, user: User, db: DbSession) -> Ticket
 
 def escape_ticket_search(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def ticket_response_data(ticket: Ticket, user: User) -> dict[str, Any]:
+    data = {
+        field: getattr(ticket, field)
+        for field in TicketRead.model_fields
+        if field != "priority_label" and hasattr(ticket, field)
+    }
+    data["priority_label"] = priority_label(
+        ticket.priority,
+        requester=field_role_for_user(user) == "Requester",
+    )
+    return data
 
 
 def validate_profile_config(kind: str, config: dict) -> dict:
@@ -409,6 +429,10 @@ async def list_tickets(
             "requester_active": requester.is_active if user.profile.interface != "self_service" else None,
             "requester_vip": False if user.profile.interface != "self_service" else None,
             "flagged": ticket.flagged if user.profile.interface != "self_service" else None,
+            "priority_label": priority_label(
+                ticket.priority,
+                requester=field_role_for_user(user) == "Requester",
+            ),
         }
         for ticket, requester in result.all()
     ]
@@ -418,6 +442,9 @@ async def list_tickets(
         "page_size": page_size,
         "total": total,
         "pages": max(1, (total + page_size - 1) // page_size),
+        "priority_options": priority_options(
+            requester=field_role_for_user(user) == "Requester",
+        ),
     }
 
 
@@ -626,7 +653,7 @@ async def get_ticket(ticket_id: int, user: CurrentUser, db: DbSession) -> dict:
     routed_team_id = await db.scalar(select(ticket_route_team_id()).where(Ticket.id == ticket.id))
     routed_team_name = await db.scalar(select(Group.name).where(Group.id == routed_team_id)) if routed_team_id else None
     return {
-        **{field: getattr(ticket, field) for field in TicketRead.model_fields if hasattr(ticket, field)},
+        **ticket_response_data(ticket, user),
         "assignee_name": assigned_name,
         "team_id": routed_team_id,
         "team_name": routed_team_name,
@@ -635,18 +662,36 @@ async def get_ticket(ticket_id: int, user: CurrentUser, db: DbSession) -> dict:
 
 @router.post("/tickets", response_model=TicketRead, status_code=status.HTTP_201_CREATED)
 async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession) -> Ticket:
+    is_requester = field_role_for_user(user) == "Requester"
     field_values = dict(payload.custom_fields)
     trusted_field_values: dict[str, object] = {}
-    if user.profile.interface == "self_service":
+    if is_requester:
+        if {"urgency", "impact"} & payload.model_fields_set or {"urgency", "impact"} & set(field_values):
+            raise HTTPException(status_code=422, detail="Requesters cannot set urgency or impact")
+        try:
+            selected_priority = requester_priority_value(payload.priority if payload.priority is not None else "medium")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Choose a valid priority") from exc
         field_values.pop("user", None)
         field_values.pop("organisation", None)
-        disallowed_fields = set(field_values) - {"summary", "details", "category", "urgency", "impact"}
+        disallowed_fields = set(field_values) - REQUESTER_FORM_FIELDS
         if disallowed_fields:
             raise HTTPException(
                 status_code=422,
                 detail=f"Fields are not editable by Requesters: {', '.join(sorted(disallowed_fields))}",
             )
+        if payload.category_id is not None:
+            raise HTTPException(status_code=422, detail="Requesters cannot set a category")
+        field_values["priority"] = selected_priority
         trusted_field_values = {"user": user.id, "organisation": user.entity_id}
+    elif payload.priority is not None:
+        if type(payload.priority) is not int or not 1 <= payload.priority <= 5:
+            raise HTTPException(status_code=422, detail="Staff priority must be a numeric level from 1 to 5")
+        selected_priority = payload.priority
+    else:
+        selected_priority = None
+    field_values["summary"] = payload.title
+    field_values["details"] = payload.description
     if isinstance(payload.description, str):
         payload.description = sanitize_rich_text(payload.description)
     ticket_type_id = payload.ticket_type_id or await db.scalar(select(TicketTypeDefinition.id).where(
@@ -656,21 +701,34 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
     ))
     if ticket_type_id is None:
         raise HTTPException(status_code=422, detail="A valid ticket type is required")
-    if user.profile.name == "Requester":
+    if is_requester:
+        if payload.type not in {"INCIDENT", "REQUEST"}:
+            raise HTTPException(status_code=422, detail="Requesters can create incidents or service requests only")
         ticket_type = await db.scalar(select(TicketTypeDefinition).where(
             TicketTypeDefinition.id == ticket_type_id,
             (TicketTypeDefinition.entity_id == user.entity_id) | (TicketTypeDefinition.entity_id.is_(None)),
             TicketTypeDefinition.is_active.is_(True),
         ))
-        if ticket_type is not None and ticket_type.itil_class not in {"INCIDENT", "REQUEST"}:
+        if ticket_type is None or ticket_type.itil_class != payload.type:
             raise HTTPException(status_code=422, detail="Ticket type is not available in the self-service portal")
+    requester_id = user.id
+    if not is_requester and payload.requester_id is not None:
+        requested_user = await db.scalar(select(User).where(
+            User.id == payload.requester_id,
+            User.entity_id == user.entity_id,
+            User.is_active.is_(True),
+        ))
+        if requested_user is None:
+            raise HTTPException(status_code=422, detail="Requester is outside your entity or inactive")
+        requester_id = requested_user.id
     if "sla" in field_values and not has_profile_right(user, "override_sla"):
         raise HTTPException(status_code=403, detail="SLA override permission required")
+    trusted_field_values = {"user": requester_id, "organisation": user.entity_id}
     field_values = await validate_custom_fields(
         db,
         ticket_type_id,
         user.entity_id,
-        user.profile.name,
+        field_role_for_user(user),
         field_values,
         trusted_values=trusted_field_values,
     )
@@ -679,21 +737,29 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
     requested_sla_id = payload.sla_id
     if requested_sla_id is not None and not has_profile_right(user, "override_sla"):
         raise HTTPException(status_code=403, detail="SLA override permission required")
-    requester_id = user.id
-    if user.profile.interface == "helpdesk" and payload.requester_id is not None:
-        requester = await db.scalar(select(User).where(
-            User.id == payload.requester_id,
-            User.entity_id == user.entity_id,
-            User.is_active.is_(True),
-        ))
-        if requester is None:
-            raise HTTPException(status_code=422, detail="Requester is outside your entity or inactive")
-        requester_id = requester.id
     if payload.assignee_id is not None and await db.scalar(select(User).where(User.id == payload.assignee_id, User.entity_id == user.entity_id, User.is_active.is_(True))) is None:
         raise HTTPException(status_code=422, detail="Assignee is outside your entity or inactive")
-    matrix = await db.scalar(select(PriorityMatrix).where(PriorityMatrix.entity_id == user.entity_id))
-    priority = calculate_priority(payload.urgency, payload.impact) if matrix is None else matrix.matrix[payload.urgency - 1][payload.impact - 1]
-    ticket = Ticket(**payload.model_dump(exclude={"type", "sla_id", "requester_id", "ticket_type_id", "custom_fields"}), type=payload.type, ticket_type_id=ticket_type_id, custom_fields=field_values, priority=priority, entity_id=user.entity_id, requester_id=requester_id)
+    urgency = payload.urgency if payload.urgency is not None else 3
+    impact = payload.impact if payload.impact is not None else 3
+    if selected_priority is not None:
+        urgency, impact = priority_urgency_impact(selected_priority)
+        priority = selected_priority
+    else:
+        matrix = await db.scalar(select(PriorityMatrix).where(PriorityMatrix.entity_id == user.entity_id))
+        priority = calculate_priority(urgency, impact) if matrix is None else matrix.matrix[urgency - 1][impact - 1]
+    ticket = Ticket(
+        **payload.model_dump(
+            exclude={"type", "sla_id", "requester_id", "ticket_type_id", "custom_fields", "priority", "urgency", "impact"}
+        ),
+        type=payload.type,
+        urgency=urgency,
+        impact=impact,
+        ticket_type_id=ticket_type_id,
+        custom_fields=field_values,
+        priority=priority,
+        entity_id=user.entity_id,
+        requester_id=requester_id,
+    )
     if ticket.assignee_id:
         ticket.status = "ASSIGNED"
     db.add(ticket)
@@ -752,6 +818,25 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
                 if rule_sla:
                     ticket.sla_id = rule_sla.id
                     calculate_sla_deadlines(ticket, rule_sla.tto_minutes, rule_sla.ttr_minutes, rule_sla.calendar)
+    if selected_priority is not None:
+        ticket.priority = selected_priority
+        ticket.urgency, ticket.impact = priority_urgency_impact(selected_priority)
+        entity_name = await db.scalar(select(Entity.name).where(Entity.id == user.entity_id))
+        priority_sla = await db.scalar(
+            select(SLA).where(
+                SLA.entity_id == user.entity_id,
+                SLA.name == f"{entity_name} Priority {selected_priority} SLA",
+                SLA.is_active.is_(True),
+            )
+        )
+        if priority_sla is not None:
+            ticket.sla_id = priority_sla.id
+            calculate_sla_deadlines(
+                ticket,
+                priority_sla.tto_minutes,
+                priority_sla.ttr_minutes,
+                priority_sla.calendar,
+            )
     db.add(TicketActor(ticket_id=ticket.id, actor_type="USER", actor_id=requester_id, role="REQUESTER"))
     if assigned_group_id is not None:
         db.add(TicketActor(ticket_id=ticket.id, actor_type="GROUP", actor_id=assigned_group_id, role="ASSIGNEE"))
@@ -763,7 +848,7 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
     send_ticket_notification.delay(ticket.id, "created")
     if ticket.assignee_id is not None:
         send_ticket_notification.delay(ticket.id, "assigned")
-    return ticket
+    return ticket_response_data(ticket, user)
 
 
 @router.post("/tickets/{ticket_id}/claim", response_model=TicketRead)
@@ -825,11 +910,14 @@ async def assign_ticket(
 
 @router.patch("/tickets/{ticket_id}", response_model=TicketRead)
 async def update_ticket(ticket_id: int, payload: TicketUpdate, user: CurrentUser, db: DbSession) -> Ticket:
-    require_helpdesk(user)
+    if not can_update_tickets(user):
+        raise HTTPException(status_code=403, detail="Ticket update permission required")
     ticket = await get_scoped_ticket(ticket_id, user, db)
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     values = payload.model_dump(exclude_unset=True)
+    if any(values.get(key) is None for key in ("priority", "ticket_type_id") if key in values):
+        raise HTTPException(status_code=422, detail="Priority and ticket type cannot be null")
     if any(key in values for key in ("assignee_id", "team_id")) and not can_assign_tickets(user):
         raise HTTPException(status_code=403, detail="Ticket assignment permission required")
     effects = await apply_ticket_update(
@@ -843,7 +931,7 @@ async def update_ticket(ticket_id: int, payload: TicketUpdate, user: CurrentUser
     await db.commit()
     await db.refresh(ticket)
     dispatch_ticket_update_effects(ticket.id, effects)
-    return ticket
+    return ticket_response_data(ticket, user)
 
 
 @router.post("/tickets/bulk", response_model=TicketBulkResult)
