@@ -26,3 +26,8 @@ backup*
 svc-docker-cli-config/
 .DS_Store
 Thumbs.db
+
+# legacy Node/React app, not part of this project
+/server/
+/client/
+
