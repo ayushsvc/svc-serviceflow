@@ -8,6 +8,7 @@ from app.core.db import SessionLocal
 from app.core.security import hash_password
 from app.models import (
     BusinessRule,
+    Category,
     Entity,
     FieldDefinition,
     Group,
@@ -18,6 +19,7 @@ from app.models import (
     SLA,
     TicketTypeDefinition,
     TicketTypeField,
+    TicketTemplate,
     User,
 )
 
@@ -50,9 +52,107 @@ ADMIN_TECHNICIAN_FIELDS = {
     "followup_date", "time_estimate", "tags", "cc", "parent_ticket", "related_tickets", "flag",
 }
 ORIGINAL_REQUESTER_EDITABLE_FIELDS = {"summary", "details", "user", "organisation", "category"}
+DEFAULT_TICKET_TEMPLATES = {
+    "INCIDENT": [
+        ("Cannot log in / password reset", "Get help restoring account access or resetting a password."),
+        ("Email not working", "Report email delivery, access, or synchronization problems."),
+        ("Laptop slow or not starting", "Request help diagnosing a slow or non-starting laptop."),
+        ("Printer not working", "Report printer connectivity, queue, or print-quality problems."),
+        ("Wi-Fi / network issue", "Report a Wi-Fi, wired network, or connectivity issue."),
+        ("Software crashes or errors", "Report an application crash or unexpected error."),
+    ],
+    "REQUEST": [
+        ("New joiner setup", "Prepare accounts, equipment, and access for a new colleague."),
+        ("Software installation request", "Request installation of approved software."),
+        ("Access / permission request", "Request access to a system, folder, or service."),
+        ("Hardware request", "Request a device or other approved hardware."),
+        ("VPN access", "Request secure remote access through the company VPN."),
+    ],
+    "PROBLEM": [
+        ("Recurring issue investigation", "Investigate a recurring incident and identify its underlying cause."),
+    ],
+    "CHANGE": [
+        ("Standard change", "Plan a routine, low-risk, repeatable service change."),
+        ("Emergency change", "Record an urgent change needed to restore or protect service."),
+    ],
+}
 
 
-async def seed_entity_defaults(db: AsyncSession, entity: Entity) -> None:
+async def seed_ticket_templates(db: AsyncSession, entity: Entity) -> list[str]:
+    created: list[str] = []
+    category_id = await db.scalar(
+        select(Category.id)
+        .where(Category.entity_id == entity.id)
+        .order_by(Category.id)
+        .limit(1)
+    )
+    for itil_class, defaults in DEFAULT_TICKET_TEMPLATES.items():
+        ticket_type = await db.scalar(
+            select(TicketTypeDefinition)
+            .where(
+                TicketTypeDefinition.itil_class == itil_class,
+                TicketTypeDefinition.is_active.is_(True),
+                (TicketTypeDefinition.entity_id == entity.id)
+                | TicketTypeDefinition.entity_id.is_(None),
+            )
+            .order_by(TicketTypeDefinition.entity_id.is_(None), TicketTypeDefinition.id)
+            .limit(1)
+        )
+        if ticket_type is None:
+            continue
+        field_rows = (
+            await db.execute(
+                select(FieldDefinition.key, TicketTypeField.field_definition_id)
+                .join(
+                    TicketTypeField,
+                    TicketTypeField.field_definition_id == FieldDefinition.id,
+                )
+                .where(TicketTypeField.ticket_type_id == ticket_type.id)
+            )
+        ).all()
+        available_fields = {key for key, _ in field_rows}
+        for name, description in defaults:
+            existing = await db.scalar(
+                select(TicketTemplate).where(
+                    TicketTemplate.entity_id == entity.id,
+                    TicketTemplate.name == name,
+                    TicketTemplate.ticket_type_id == ticket_type.id,
+                )
+            )
+            if existing is not None:
+                continue
+            prefilled = {
+                key: value
+                for key, value in {
+                    "summary": name,
+                    "details": (
+                        "<p>What happened?</p><p>When did it start?</p>"
+                        "<p>What is the impact?</p>"
+                    ),
+                    "category": category_id,
+                    "urgency": 3,
+                    "impact": 3,
+                }.items()
+                if key in available_fields and (key != "category" or category_id is not None)
+            }
+            db.add(
+                TicketTemplate(
+                    entity_id=entity.id,
+                    name=name,
+                    description=description,
+                    ticket_type_id=ticket_type.id,
+                    prefilled=prefilled,
+                    is_active=True,
+                    show_on_portal=itil_class in {"INCIDENT", "REQUEST"},
+                    sort_order=len(created),
+                )
+            )
+            created.append(f"{ticket_type.name}: {name}")
+    return created
+
+
+async def seed_entity_defaults(db: AsyncSession, entity: Entity) -> list[str]:
+    created_templates = await seed_ticket_templates(db, entity)
     team_name = f"{entity.name} Service Desk"
     team = await db.scalar(select(Group).where(Group.entity_id == entity.id, Group.name == team_name))
     if team is None:
@@ -110,13 +210,23 @@ async def seed_entity_defaults(db: AsyncSession, entity: Entity) -> None:
     source = await db.scalar(select(FieldDefinition).where(FieldDefinition.key == "source"))
     if source is not None and not (source.options or {}).get("choices"):
         source.options = {"choices": ["PORTAL", "EMAIL", "PHONE", "API", "RECURRING"]}
+    return created_templates
 
 
 async def seed_profile_rights(profiles: dict[str, Profile]) -> list[str]:
     required_rights = {
         "Requester": {"ticket:own_only": True},
-        "Technician": {"ticket:view_queue": True, "ticket:claim": True},
-        "Administrator": {"ticket:view_all": True, "ticket:claim": True},
+        "Technician": {
+            "ticket:view_queue": True,
+            "ticket:claim": True,
+            "ticket:bulk_edit": True,
+        },
+        "Administrator": {
+            "ticket:view_all": True,
+            "ticket:claim": True,
+            "ticket:bulk_edit": True,
+            "ticket:assign_any": True,
+        },
     }
     changed = []
     for name, rights_to_add in required_rights.items():
@@ -208,7 +318,7 @@ async def seed() -> None:
             existing = await db.scalar(select(User).where(User.email == email))
             if existing is None:
                 db.add(User(email=email, name=name, profile_id=profiles[profile_name].id, entity_id=entity.id, password_hash=hash_password(password)))
-        await seed_entity_defaults(db, entity)
+        created_templates = await seed_entity_defaults(db, entity)
         service_desk = await db.scalar(
             select(Group).where(
                 Group.entity_id == entity.id,
@@ -232,6 +342,8 @@ async def seed() -> None:
             print("Added seeded profile rights: " + "; ".join(updated_profile_rights))
         if updated_form_fields:
             print("Updated default form visibility: " + ", ".join(updated_form_fields))
+        if created_templates:
+            print("Created seeded ticket templates: " + "; ".join(created_templates))
 
 
 if __name__ == "__main__":

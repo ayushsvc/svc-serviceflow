@@ -88,6 +88,12 @@ def send_ticket_notification(ticket_id: int, event: str) -> dict[str, str]:
     return {"status": "sent"}
 
 
+@celery_app.task
+def send_user_ticket_notification(ticket_id: int, user_id: int, event: str) -> dict[str, str]:
+    _run_async(_send_user_ticket_notification(ticket_id, user_id, event))
+    return {"status": "sent"}
+
+
 async def _send_ticket_notification(ticket_id: int, event: str) -> None:
     async with SessionLocal() as db:
         ticket = await db.scalar(select(Ticket).where(Ticket.id == ticket_id))
@@ -96,6 +102,39 @@ async def _send_ticket_notification(ticket_id: int, event: str) -> None:
         recipient = await db.scalar(select(User).where(User.id == ticket.requester_id))
         template = await db.scalar(select(NotificationTemplate).where(NotificationTemplate.entity_id == ticket.entity_id, NotificationTemplate.event == event))
         if recipient is None or template is None:
+            return
+        context = {"ticket": ticket, "user": recipient, "event": event}
+        message = EmailMessage()
+        message["From"] = get_settings().mail_from
+        message["To"] = recipient.email
+        message["Subject"] = Template(template.subject).render(**context)
+        message.set_content(Template(template.body_jinja).render(**context))
+        with smtplib.SMTP(get_settings().smtp_host, get_settings().smtp_port, timeout=10) as smtp:
+            smtp.send_message(message)
+
+
+async def _send_user_ticket_notification(ticket_id: int, user_id: int, event: str) -> None:
+    async with SessionLocal() as db:
+        ticket = await db.scalar(select(Ticket).where(Ticket.id == ticket_id))
+        recipient = await db.scalar(
+            select(User).where(User.id == user_id, User.is_active.is_(True))
+        )
+        if ticket is None or recipient is None or recipient.entity_id != ticket.entity_id:
+            return
+        template = await db.scalar(
+            select(NotificationTemplate).where(
+                NotificationTemplate.entity_id == ticket.entity_id,
+                NotificationTemplate.event == event,
+            )
+        )
+        if template is None and event in {"assigned_to_you", "assignment_removed", "team_assigned"}:
+            template = await db.scalar(
+                select(NotificationTemplate).where(
+                    NotificationTemplate.entity_id == ticket.entity_id,
+                    NotificationTemplate.event == "assigned",
+                )
+            )
+        if template is None:
             return
         context = {"ticket": ticket, "user": recipient, "event": event}
         message = EmailMessage()

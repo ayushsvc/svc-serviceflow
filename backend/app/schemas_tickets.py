@@ -1,7 +1,8 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic import StrictInt
 
 
 class CategoryCreate(BaseModel):
@@ -65,8 +66,51 @@ class TicketUpdate(BaseModel):
     impact: int | None = Field(default=None, ge=1, le=5)
     category_id: int | None = None
     assignee_id: int | None = None
+    team_id: int | None = None
+    priority: int | None = Field(default=None, ge=1, le=5)
+    flagged: bool | None = None
     ticket_type_id: int | None = Field(default=None, gt=0)
     custom_fields: dict[str, Any] | None = None
+
+
+class TicketBulkUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ticket_ids: list[StrictInt] = Field(min_length=1, max_length=100)
+    action: Literal["status", "priority", "assignee", "team", "flag"]
+    value: Any
+
+
+class TicketAssignRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    assignee_id: StrictInt | None
+    team_id: StrictInt | None = None
+
+
+class AssignableUserRead(BaseModel):
+    id: int
+    name: str
+    email: str
+    teams: list[str]
+    open_ticket_count: int
+    agent_status: str | None = None
+
+
+class TicketBulkResultItem(BaseModel):
+    ticket_id: int
+    ok: bool
+    reason: Literal[
+        "not_found",
+        "forbidden_action",
+        "invalid_transition",
+        "approval_required",
+        "invalid_value",
+        "unchanged",
+    ] | None = None
+
+
+class TicketBulkResult(BaseModel):
+    results: list[TicketBulkResultItem]
+    summary: dict[str, int]
 
 
 class FollowupCreate(BaseModel):
@@ -151,6 +195,15 @@ class TicketRead(BaseModel):
     requester_active: bool | None = None
     requester_vip: bool | None = None
     flagged: bool | None = None
+    assignee_name: str | None = None
+    team_id: int | None = None
+    team_name: str | None = None
+
+
+class TicketAssignResult(BaseModel):
+    ticket: TicketRead
+    ok: bool
+    reason: Literal["unchanged"] | None = None
 
 
 class TicketListResponse(BaseModel):

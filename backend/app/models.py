@@ -128,7 +128,26 @@ class TicketTemplate(Base):
     name: Mapped[str] = mapped_column(String(160))
     ticket_type_id: Mapped[int] = mapped_column(ForeignKey("ticket_types.id"))
     team_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id"), nullable=True)
+    entity_id: Mapped[int | None] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), nullable=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    show_on_portal: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     prefilled: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+
+class TicketTemplateUsage(Base):
+    __tablename__ = "ticket_template_usage"
+    __table_args__ = (
+        UniqueConstraint("entity_id", "user_id", "template_id", name="uq_ticket_template_usage_owner"),
+        Index("ix_ticket_template_usage_recent", "entity_id", "user_id", "last_used_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    entity_id: Mapped[int] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    template_id: Mapped[int] = mapped_column(ForeignKey("ticket_templates.id", ondelete="CASCADE"), index=True)
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    uses: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class TicketType(StrEnum):

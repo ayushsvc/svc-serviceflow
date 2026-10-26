@@ -1,6 +1,8 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import AssignPicker from "./components/AssignPicker";
+import TemplatePicker from "./components/TemplatePicker";
 
 type TokenPair = { access_token: string; refresh_token: string };
 type TicketListColumn = "id" | "title" | "status" | "priority" | "opened_at" | "requester_name" | "requester_active" | "requester_vip" | "flagged" | "assignee_id" | "ttr_due_at";
@@ -30,6 +32,9 @@ type Ticket = {
   opened_at: string;
   ttr_due_at?: string | null;
   assignee_id?: number | null;
+  assignee_name?: string | null;
+  team_id?: number | null;
+  team_name?: string | null;
   category_id?: number | null;
   requester_name?: string | null;
   requester_active?: boolean | null;
@@ -44,7 +49,6 @@ type Group = { id: number; name: string };
 type TicketType = { id: number; name: string; itil_class: string; fields: Array<{ field_definition_id: number; key?: string; required: boolean; page: string }> };
 type FormField = { key: string; label: string; type: string; options: Record<string, unknown>; validation: Record<string, unknown>; required: boolean; editable: boolean; default_value: unknown; page: string; show_on_portal: boolean; show_condition: Record<string, unknown> };
 type FormSchema = { ticket_type_id: number; name: string; pages: Record<string, FormField[]> };
-type TicketTemplate = { id: number; name: string; ticket_type_id: number; prefilled: Record<string, unknown> };
 type AssignmentPreview = { team_name: string | null; agent_name: string | null; priority: number; sla: { sla_name: string | null; response_target: string | null; fix_target: string | null } };
 type TicketWorkflow = { id?: number; entity_id?: number; record_type?: string; states: string[]; transitions: Record<string, string[]>; approval_requirements: Record<string, number>; is_active: boolean };
 type WorkflowApproval = { id: number; record_type: string; record_id: number; transition_to: string; step: number; status: string; note: string | null; created_at: string };
@@ -158,12 +162,13 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   const [requesterSearch, setRequesterSearch] = useState("");
   const [selectedRequesterId, setSelectedRequesterId] = useState<number | null>(null);
   const [agents, setAgents] = useState<Requester[]>([]);
+  const [assignmentMessage, setAssignmentMessage] = useState("");
+  const [assignmentPickerTicketId, setAssignmentPickerTicketId] = useState<number | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [ticketType, setTicketType] = useState("INCIDENT");
   const [ticketTypes, setTicketTypes] = useState<TicketType[]>([]);
   const [formSchema, setFormSchema] = useState<FormSchema | null>(null);
-  const [templates, setTemplates] = useState<TicketTemplate[]>([]);
   const [assignmentPreview, setAssignmentPreview] = useState<AssignmentPreview | null>(null);
   const [submitAnother, setSubmitAnother] = useState(false);
   const [draftSaved, setDraftSaved] = useState(false);
@@ -194,6 +199,19 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   const [queueFilter, setQueueFilter] = useState<"all" | "mine" | "teams" | "unassigned">("all");
   const [queueCounts, setQueueCounts] = useState({ all: 0, mine: 0, teams: 0, unassigned: 0 });
   const queueAccess = Boolean(currentUser?.profile.rights?.["ticket:view_queue"] && !currentUser?.profile.rights?.["ticket:view_all"] && !currentUser?.profile.rights?.["*"]);
+  const canAssignTickets = Boolean(
+    currentUser?.profile.rights?.["ticket:assign_any"]
+    || currentUser?.profile.rights?.["ticket:bulk_edit"]
+    || currentUser?.profile.rights?.["ticket:edit"]
+    || currentUser?.profile.rights?.["ticket:update"]
+    || currentUser?.profile.rights?.["ticket:assign"]
+    || currentUser?.profile.rights?.["*"],
+  );
+  const canManageTemplates = Boolean(
+    currentUser?.profile.rights?.["templates:manage"]
+    || currentUser?.profile.rights?.["ticket:view_all"]
+    || currentUser?.profile.rights?.["*"],
+  );
   const draftKey = currentUser ? `svc-ticket-draft:${currentUser.id}` : null;
 
   const apiHeaders = { Authorization: `Bearer ${token.access_token}` };
@@ -278,9 +296,22 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
 
   async function selectTicket(ticket: Ticket) {
     setSelected(ticket);
+    setAssignmentMessage("");
     setShowDrawer(true);
-    const response = await fetch(`/api/v1/tickets/${ticket.id}/timeline`, { headers: apiHeaders });
+    const [detailResponse, timelineResponse] = await Promise.all([
+      fetch(`/api/v1/tickets/${ticket.id}`, { headers: apiHeaders }),
+      fetch(`/api/v1/tickets/${ticket.id}/timeline`, { headers: apiHeaders }),
+    ]);
+    if (detailResponse.ok) setSelected((await detailResponse.json()) as Ticket);
+    if (timelineResponse.ok) setTimeline((await timelineResponse.json()) as TimelineItem[]);
+  }
+  async function onTicketAssigned(updated: Partial<Ticket> & Pick<Ticket, "id">) {
+    setSelected((current) => current?.id === updated.id ? { ...current, ...updated } : current);
+    setTickets((items) => items.map((item) => item.id === updated.id ? { ...item, ...updated } : item));
+    setAssignmentMessage(`Ticket #${updated.id} assignment updated.`);
+    const response = await fetch(`/api/v1/tickets/${updated.id}/timeline`, { headers: apiHeaders });
     if (response.ok) setTimeline((await response.json()) as TimelineItem[]);
+    await loadTickets();
   }
   async function claimTicket(ticket: Ticket) {
     const previousTickets = tickets;
@@ -358,9 +389,6 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         const incident = types.find((item) => item.itil_class === "INCIDENT") ?? types[0];
         if (incident) setTicketType(String(incident.id));
       });
-    void fetch("/api/v1/templates", { headers: apiHeaders })
-      .then((response) => response.ok ? response.json() : [])
-      .then((loaded: TicketTemplate[]) => setTemplates(loaded));
   }, [currentUser]);
   useEffect(() => {
     if (!ticketType) return;
@@ -403,9 +431,22 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     setDraftSaved(true);
     setCreateError("Draft saved on this device.");
   }
-  function applyTemplate(templateId: string) {
-    const template = templates.find((item) => String(item.id) === templateId);
-    if (template) setCustomFields((current) => ({ ...current, ...template.prefilled }));
+  function applyTemplateValues(prefilled: Record<string, unknown>) {
+    setCustomFields((current) => ({ ...current, ...prefilled }));
+    if (typeof prefilled.summary === "string") setNewTitle(prefilled.summary);
+    if (typeof prefilled.details === "string") setNewDescription(prefilled.details);
+    if (prefilled.category !== undefined && prefilled.category !== null) setCategoryId(String(prefilled.category));
+    if (typeof prefilled.urgency === "number" || typeof prefilled.urgency === "string") setUrgency(String(prefilled.urgency));
+    if (typeof prefilled.impact === "number" || typeof prefilled.impact === "string") setImpact(String(prefilled.impact));
+  }
+
+  function restoreTemplateValues(values: Record<string, unknown>) {
+    setCustomFields(values);
+    setNewTitle(typeof values.summary === "string" ? values.summary : "");
+    setNewDescription(typeof values.details === "string" ? values.details : "");
+    setCategoryId(values.category == null ? "" : String(values.category));
+    setUrgency(values.urgency == null ? "3" : String(values.urgency));
+    setImpact(values.impact == null ? "3" : String(values.impact));
   }
 
   async function createTicket(event: FormEvent<HTMLFormElement>) {
@@ -484,7 +525,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
           <div className="workspace-menu-heading"><span className="avatar avatar-indigo">SI</span><span><strong>Service desk</strong><small>{currentUser?.email ?? "Operations workspace"}</small></span><span className="menu-check">✓</span></div>
           <div className="workspace-menu-divider" />
           <button role="menuitem" onClick={() => { setActiveNav("Overview"); setWorkspaceMenuOpen(false); }}><Icon name="grid" /><span>Workspace overview</span></button>
-          {currentUser?.profile.name === "Administrator" && <button role="menuitem" onClick={() => { setActiveNav("Settings"); setWorkspaceMenuOpen(false); }}><Icon name="settings" /><span>Administration</span></button>}
+          {canManageTemplates && <button role="menuitem" onClick={() => { setActiveNav("Settings"); setWorkspaceMenuOpen(false); }}><Icon name="settings" /><span>Administration</span></button>}
           <button role="menuitem" onClick={() => { setWorkspaceMenuOpen(false); onSignOut(); }}><span className="menu-signout">↗</span><span>Sign out</span></button>
         </div>}
       </div>
@@ -518,17 +559,133 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
             <label className="profile-name-field">Profile name<input value={profileName} maxLength={120} onChange={(event) => setProfileName(event.target.value)} placeholder="Name this view" /></label>
             <button className="secondary-button" onClick={() => void saveListProfile()}>Save as</button>
           </div>
+          {assignmentMessage && <p className="success-message" role="status">{assignmentMessage}</p>}
           <div className="profile-column-chooser"><strong>Choose columns</strong>{ticketListColumns.map(({ key, label }) => <label key={key}><input type="checkbox" checked={listColumns.includes(key)} onChange={(event) => setListColumns((columns) => event.target.checked ? [...columns, key] : columns.length > 1 ? columns.filter((column) => column !== key) : columns)} />{label}</label>)}</div>
           {error && <p className="error" role="alert">{error}</p>}
           <div className="table-meta"><span><strong>{listTotal}</strong> tickets</span><button className="clear-button" onClick={clearFilters}>Clear filters</button></div>
-          <div className="ticket-table-wrap"><table><thead><tr><th className="check-col"><input type="checkbox" aria-label="Select all tickets" /></th>{listColumns.map((column) => <th key={column}>{ticketListColumns.find((item) => item.key === column)?.label ?? column}</th>)}<th /></tr></thead><tbody>{filteredTickets.map((ticket) => <tr key={ticket.id} className={selected?.id === ticket.id ? "row-selected" : ""} onClick={() => void selectTicket(ticket)}><td className="check-col" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ticket ${ticket.id}`} /></td>{listColumns.map((column) => <td key={column}>{renderTicketColumn(ticket, column)}</td>)}<td>{queueAccess && !ticket.assignee_id && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void claimTicket(ticket); }}>Claim</button>}<button className="row-menu" onClick={(event) => event.stopPropagation()}>•••</button></td></tr>)}</tbody></table>{!filteredTickets.length && <div className="empty-table"><strong>{queueAccess ? "No tickets in this queue" : "No tickets found"}</strong><span>{queueAccess ? "Try another queue or refresh the list." : "Try changing your search or filters."}</span></div>}</div>
+          <div className="ticket-table-wrap"><table><thead><tr><th className="check-col"><input type="checkbox" aria-label="Select all tickets" /></th>{listColumns.map((column) => <th key={column}>{ticketListColumns.find((item) => item.key === column)?.label ?? column}</th>)}<th /></tr></thead><tbody>{filteredTickets.map((ticket) => <tr key={ticket.id} className={selected?.id === ticket.id ? "row-selected" : ""} onClick={() => void selectTicket(ticket)}><td className="check-col" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ticket ${ticket.id}`} /></td>{listColumns.map((column) => <td key={column}>{renderTicketColumn(ticket, column)}</td>)}<td>{queueAccess && !ticket.assignee_id && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void claimTicket(ticket); }}>Claim</button>}{canAssignTickets && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void selectTicket(ticket); setAssignmentPickerTicketId(ticket.id); }}>Assign</button>}<button className="row-menu" onClick={(event) => event.stopPropagation()}>•••</button></td></tr>)}</tbody></table>{!filteredTickets.length && <div className="empty-table"><strong>{queueAccess ? "No tickets in this queue" : "No tickets found"}</strong><span>{queueAccess ? "Try another queue or refresh the list." : "Try changing your search or filters."}</span></div>}</div>
           <div className="pagination-controls"><button disabled={listPage <= 1} onClick={() => setListPage((page) => page - 1)}>Previous</button><span>Page {listPage}</span><button disabled={listPage * listPageSize >= listTotal} onClick={() => setListPage((page) => page + 1)}>Next</button></div>
         </section>
         </>}
       </div>
     </main>
-    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{statusLabels[selected.status] ?? selected.status}</span>{queueAccess && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}</div><div className="drawer-tabs"><button className="tab active">Activity</button><button className="tab">Details</button></div><div className="drawer-content"><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><form className="reply-box" onSubmit={addFollowup}><div className="reply-type"><span>Public reply</span><button type="button">⌄</button></div><textarea value={followup} onChange={(event) => setFollowup(event.target.value)} placeholder="Write a reply to the requester…" /><div className="reply-actions"><span>Visible to requester</span><button className="primary-button" type="submit">Send reply <Icon name="arrow" /></button></div></form><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>Employee</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_id ? "Assigned technician" : "Unassigned"}</dd></div></dl></section></div></aside>}
-    {showCreate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowCreate(false); }}>    <form className="create-modal" onSubmit={createTicket} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); event.currentTarget.requestSubmit(); } }}><div className="modal-header"><div><p className="kicker">NEW REQUEST</p><h2>Create a ticket</h2></div><button type="button" className="icon-button" onClick={() => setShowCreate(false)} aria-label="Close"><Icon name="close" /></button></div>    <label>{currentUser?.profile.interface === "self_service" ? "What do you need?" : "Ticket type"}<select value={ticketType} onChange={(event) => setTicketType(event.target.value)} required><option value="">Select a request type</option>{ticketTypes.map((type) => <option key={type.id} value={type.id}>{type.itil_class === "INCIDENT" ? "Report an issue · Incident" : type.itil_class === "REQUEST" ? "Request a service · Service Request" : type.name}</option>)}</select>{currentUser?.profile.interface === "self_service" && <small className="form-help">Choose Incident for an interruption or fault. Choose Service Request for access, hardware, software, or another service.</small>}</label><label>Template (optional)<select defaultValue="" onChange={(event) => applyTemplate(event.target.value)}><option value="">Start from blank</option>{templates.filter((template) => String(template.ticket_type_id) === ticketType).map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></label>{currentUser?.profile.interface === "helpdesk" &&     <label>Requester<input list="requester-options" value={requesterSearch} onChange={(event) => { const value = event.target.value; setRequesterSearch(value); const match = requesters.find((requester) => `${requester.name} — ${requester.email}` === value); setSelectedRequesterId(match?.id ?? null); }} placeholder="Search by name or email" /><datalist id="requester-options">{requesters.map((requester) => <option key={requester.id} value={`${requester.name} — ${requester.email}`} />)}</datalist>{selectedRequesterId && (() => { const requester = requesters.find((item) => item.id === selectedRequesterId); return requester ? <span className="requester-card"><strong>{requester.name}</strong><small>{requester.email} · Organisation: current entity · Active requester</small><b aria-label="VIP requester">★</b></span> : null; })()}</label>}<label>Summary<input value={newTitle} onChange={(event) => setNewTitle(event.target.value)} minLength={5} required placeholder="Summarize the issue" /></label><label>Description<textarea value={newDescription} onChange={(event) => setNewDescription(event.target.value)} minLength={10} required placeholder="Tell the support team what happened and what you need." /></label>{formSchema ?     <DynamicFields schema={formSchema} values={customFields} onChange={(key, value) => setCustomFields((current) => ({ ...current, [key]: value }))} portal={currentUser?.profile.interface === "self_service"} /> : <p className="form-help">Loading the selected ticket form…</p>}    <label className="file-picker">Attachments <span>Optional</span><span className="drop-zone" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); setNewFiles((current) => [...current, ...Array.from(event.dataTransfer.files)]); }}><input type="file" accept=".pdf,.png,.jpg,.jpeg,.txt,application/pdf,image/png,image/jpeg,text/plain" multiple onChange={(event) => setNewFiles(Array.from(event.target.files ?? []))} /><strong>Drop files here or choose files</strong><small>PDF, PNG, JPG, or TXT. Up to 10 MB per file.</small></span></label>{newFiles.length > 0 && <div className="file-list">{newFiles.map((file) => <span key={`${file.name}-${file.size}`}>{file.name}<b>{formatFileSize(file.size)}</b></span>)}</div>}{createError && <p className="error">{createError}</p>}{uploadMessage && <p className="error">{uploadMessage}</p>}    <aside className="new-ticket-sidebar" aria-label="Ticket preview"><p className="kicker">LIVE ROUTING</p><div className={`priority-preview priority-${assignmentPreview?.priority ?? 3}`}>Priority {assignmentPreview?.priority ?? "—"}</div><dl>{assignmentPreview?.team_name && <div><dt>Suggested team</dt><dd>{assignmentPreview.team_name}</dd></div>}{assignmentPreview?.agent_name && <div><dt>Suggested agent</dt><dd>{assignmentPreview.agent_name}</dd></div>}{assignmentPreview?.sla.sla_name && <div><dt>SLA</dt><dd>{assignmentPreview.sla.sla_name}</dd></div>}<div><dt>Response target</dt><dd>{assignmentPreview?.sla.response_target ? new Date(assignmentPreview.sla.response_target).toLocaleString() : "Pending selection"}</dd></div><div><dt>Fix target</dt><dd>{assignmentPreview?.sla.fix_target ? new Date(assignmentPreview.sla.fix_target).toLocaleString() : "Pending selection"}</dd></div></dl><p className="kicker">KNOWLEDGE SUGGESTIONS</p><small>{newTitle.trim() ? "Search suggestions will appear as knowledge articles are connected to this summary." : "Start typing a Summary to see suggested articles."}</small></aside><div className="modal-actions"><label className="checkbox"><input type="checkbox" checked={submitAnother} onChange={(event) => setSubmitAnother(event.target.checked)} /> Create another</label><button type="button" className="secondary-button" onClick={() => { if (!newTitle && !newDescription || window.confirm("Discard this ticket draft?")) setShowCreate(false); }}>Cancel</button><button type="button" className="secondary-button" onClick={saveDraft}>Save draft</button><button type="submit" className="primary-button" disabled={!formSchema}>Submit ticket <Icon name="arrow" /></button></div></form></div>}
+    {assignmentPickerTicketId !== null && currentUser && (() => {
+      const ticket = selected?.id === assignmentPickerTicketId
+        ? selected
+        : tickets.find((item) => item.id === assignmentPickerTicketId);
+      return ticket ? <AssignPicker
+        ticketId={ticket.id}
+        token={token}
+        currentUserId={currentUser.id}
+        currentAssigneeId={ticket.assignee_id ?? null}
+        currentAssigneeName={ticket.assignee_name}
+        currentTeamId={ticket.team_id}
+        currentTeamName={ticket.team_name}
+        teams={groups}
+        onClose={() => setAssignmentPickerTicketId(null)}
+        onAssigned={onTicketAssigned}
+      /> : null;
+    })()}
+    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{statusLabels[selected.status] ?? selected.status}</span>{queueAccess && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}{canAssignTickets && <button className="secondary-button" onClick={() => setAssignmentPickerTicketId(selected.id)}>Assign</button>}</div><div className="assignment-summary"><span>Assignee: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span></div><div className="drawer-tabs"><button className="tab active">Activity</button><button className="tab">Details</button></div><div className="drawer-content"><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><form className="reply-box" onSubmit={addFollowup}><div className="reply-type"><span>Public reply</span><button type="button">⌄</button></div><textarea value={followup} onChange={(event) => setFollowup(event.target.value)} placeholder="Write a reply to the requester…" /><div className="reply-actions"><span>Visible to requester</span><button className="primary-button" type="submit">Send reply <Icon name="arrow" /></button></div></form><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>Employee</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div><div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div></dl></section></div></aside>}
+    {showCreate && (
+      <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowCreate(false); }}>
+        <form
+          className="create-modal"
+          onSubmit={createTicket}
+          onKeyDown={(event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+              event.preventDefault();
+              event.currentTarget.requestSubmit();
+            }
+          }}
+        >
+          <div className="modal-header">
+            <div><p className="kicker">NEW REQUEST</p><h2>Create a ticket</h2></div>
+            <button type="button" className="icon-button" onClick={() => setShowCreate(false)} aria-label="Close"><Icon name="close" /></button>
+          </div>
+          <label>
+            {currentUser?.profile.interface === "self_service" ? "What do you need?" : "Ticket type"}
+            <select value={ticketType} onChange={(event) => setTicketType(event.target.value)} required>
+              <option value="">Select a request type</option>
+              {ticketTypes.map((type) => <option key={type.id} value={type.id}>{type.itil_class === "INCIDENT" ? "Report an issue · Incident" : type.itil_class === "REQUEST" ? "Request a service · Service Request" : type.name}</option>)}
+            </select>
+            {currentUser?.profile.interface === "self_service" && <small className="form-help">Choose Incident for an interruption or fault. Choose Service Request for access, hardware, software, or another service.</small>}
+          </label>
+          <TemplatePicker
+            token={token.access_token}
+            ticketTypeId={ticketType}
+            currentValues={{ ...customFields, summary: newTitle, details: newDescription, category: categoryId || undefined, urgency, impact }}
+            hasExistingInput={Boolean(newTitle.trim() || newDescription.trim() || Object.values(customFields).some((value) => value !== "" && value != null))}
+            canManageTemplates={canManageTemplates}
+            onApply={applyTemplateValues}
+            onRestore={restoreTemplateValues}
+            onOpenSettings={() => setActiveNav("Settings")}
+          />
+          {currentUser?.profile.interface === "helpdesk" && (
+            <label>
+              Requester
+              <input
+                list="requester-options"
+                value={requesterSearch}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setRequesterSearch(value);
+                  const match = requesters.find((requester) => `${requester.name} — ${requester.email}` === value);
+                  setSelectedRequesterId(match?.id ?? null);
+                }}
+                placeholder="Search by name or email"
+              />
+              <datalist id="requester-options">{requesters.map((requester) => <option key={requester.id} value={`${requester.name} — ${requester.email}`} />)}</datalist>
+              {selectedRequesterId && (() => {
+                const requester = requesters.find((item) => item.id === selectedRequesterId);
+                return requester ? <span className="requester-card"><strong>{requester.name}</strong><small>{requester.email} · Organisation: current entity · Active requester</small><b aria-label="VIP requester">★</b></span> : null;
+              })()}
+            </label>
+          )}
+          <label>Summary<input value={newTitle} onChange={(event) => setNewTitle(event.target.value)} minLength={5} required placeholder="Summarize the issue" /></label>
+          <label>Description<textarea value={newDescription} onChange={(event) => setNewDescription(event.target.value)} minLength={10} required placeholder="Tell the support team what happened and what you need." /></label>
+          {formSchema
+            ? <DynamicFields schema={formSchema} values={customFields} onChange={(key, value) => setCustomFields((current) => ({ ...current, [key]: value }))} portal={currentUser?.profile.interface === "self_service"} />
+            : <p className="form-help">Loading the selected ticket form…</p>}
+          <label className="file-picker">
+            Attachments <span>Optional</span>
+            <span
+              className="drop-zone"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                setNewFiles((current) => [...current, ...Array.from(event.dataTransfer.files)]);
+              }}
+            >
+              <input type="file" accept=".pdf,.png,.jpg,.jpeg,.txt,application/pdf,image/png,image/jpeg,text/plain" multiple onChange={(event) => setNewFiles(Array.from(event.target.files ?? []))} />
+              <strong>Drop files here or choose files</strong><small>PDF, PNG, JPG, or TXT. Up to 10 MB per file.</small>
+            </span>
+          </label>
+          {newFiles.length > 0 && <div className="file-list">{newFiles.map((file) => <span key={`${file.name}-${file.size}`}>{file.name}<b>{formatFileSize(file.size)}</b></span>)}</div>}
+          {createError && <p className="error">{createError}</p>}
+          {uploadMessage && <p className="error">{uploadMessage}</p>}
+          <aside className="new-ticket-sidebar" aria-label="Ticket preview">
+            <p className="kicker">LIVE ROUTING</p>
+            <div className={`priority-preview priority-${assignmentPreview?.priority ?? 3}`}>Priority {assignmentPreview?.priority ?? "—"}</div>
+            <dl>
+              {assignmentPreview?.team_name && <div><dt>Suggested team</dt><dd>{assignmentPreview.team_name}</dd></div>}
+              {assignmentPreview?.agent_name && <div><dt>Suggested agent</dt><dd>{assignmentPreview.agent_name}</dd></div>}
+              {assignmentPreview?.sla.sla_name && <div><dt>SLA</dt><dd>{assignmentPreview.sla.sla_name}</dd></div>}
+              <div><dt>Response target</dt><dd>{assignmentPreview?.sla.response_target ? new Date(assignmentPreview.sla.response_target).toLocaleString() : "Pending selection"}</dd></div>
+              <div><dt>Fix target</dt><dd>{assignmentPreview?.sla.fix_target ? new Date(assignmentPreview.sla.fix_target).toLocaleString() : "Pending selection"}</dd></div>
+            </dl>
+            <p className="kicker">KNOWLEDGE SUGGESTIONS</p>
+            <small>{newTitle.trim() ? "Search suggestions will appear as knowledge articles are connected to this summary." : "Start typing a Summary to see suggested articles."}</small>
+          </aside>
+          <div className="modal-actions">
+            <label className="checkbox"><input type="checkbox" checked={submitAnother} onChange={(event) => setSubmitAnother(event.target.checked)} /> Create another</label>
+            <button type="button" className="secondary-button" onClick={() => { if (!newTitle && !newDescription || window.confirm("Discard this ticket draft?")) setShowCreate(false); }}>Cancel</button>
+            <button type="button" className="secondary-button" onClick={saveDraft}>Save draft</button>
+            <button type="submit" className="primary-button" disabled={!formSchema}>Submit ticket <Icon name="arrow" /></button>
+          </div>
+        </form>
+      </div>
+    )}
   </div>;
 }
 
@@ -555,6 +712,10 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
   const [emailUpdates, setEmailUpdates] = useState(true);
   const [compactTables, setCompactTables] = useState(false);
   const [saved, setSaved] = useState(false);
+  const hasAdminRights = Boolean(
+    currentUser?.profile.rights?.["ticket:view_all"]
+    || currentUser?.profile.rights?.["*"],
+  );
 
   function saveSettings() {
     setSaved(true);
@@ -563,7 +724,17 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
 
   type AdminField = { id: number; key: string; label: string; type: string; options: Record<string, unknown>; validation: Record<string, unknown>; is_system: boolean };
   type AdminTicketType = { id: number; name: string; itil_class: string; default_priority: number; default_sla_id?: number | null; color?: string | null; fields: Array<{ field_definition_id: number; order: number; page: string; required: boolean; visible_to_roles: string[]; editable_by_roles: string[]; default_value: unknown; show_on_portal: boolean; show_condition: Record<string, unknown> }> };
-  type AdminTemplate = { id: number; name: string; ticket_type_id: number; team_id?: number | null; prefilled: Record<string, unknown> };
+  type AdminTemplate = {
+    id: number;
+    name: string;
+    description: string;
+    ticket_type_id: number;
+    team_id?: number | null;
+    prefilled: Record<string, unknown>;
+    is_active: boolean;
+    show_on_portal: boolean;
+    sort_order: number;
+  };
   type AdminCategory = { id: number; name: string; parent_id?: number | null; entity_id: number };
 
   function AdminPanel({ token }: { token: TokenPair }) {
@@ -572,6 +743,7 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
     const [fields, setFields] = useState<AdminField[]>([]);
     const [types, setTypes] = useState<AdminTicketType[]>([]);
     const [templates, setTemplates] = useState<AdminTemplate[]>([]);
+    const [adminGroups, setAdminGroups] = useState<Group[]>([]);
     const [adminCategories, setAdminCategories] = useState<AdminCategory[]>([]);
     const [newCategory, setNewCategory] = useState({ name: "", parent_id: "" });
     const [selectedType, setSelectedType] = useState<AdminTicketType | null>(null);
@@ -581,15 +753,26 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
     const [dirty, setDirty] = useState(false);
     const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
     const [newField, setNewField] = useState({ key: "", label: "", type: "text" });
-    const [newTemplate, setNewTemplate] = useState({ name: "", ticket_type_id: "", prefilled: "{}" });
+    const [editingTemplateId, setEditingTemplateId] = useState<number | null>(null);
+    const [newTemplate, setNewTemplate] = useState({
+      name: "",
+      description: "",
+      ticket_type_id: "",
+      team_id: "",
+      prefilled: "{}",
+      is_active: true,
+      show_on_portal: false,
+      sort_order: 0,
+    });
 
     async function loadAdminData() {
-      const [fieldResponse, typeResponse, templateResponse, matrixResponse, categoryResponse] = await Promise.all([
+      const [fieldResponse, typeResponse, templateResponse, matrixResponse, categoryResponse, groupResponse] = await Promise.all([
         fetch("/api/v1/field-definitions", { headers }),
         fetch("/api/v1/ticket-types", { headers }),
         fetch("/api/v1/templates", { headers }),
         fetch("/api/v1/priority-matrix", { headers }),
         fetch("/api/v1/categories", { headers }),
+        fetch("/api/v1/groups", { headers }),
       ]);
       if (fieldResponse.ok) setFields(await fieldResponse.json());
       if (typeResponse.ok) {
@@ -600,6 +783,7 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
       if (templateResponse.ok) setTemplates(await templateResponse.json());
       if (matrixResponse.ok) setMatrix((await matrixResponse.json()).matrix);
       if (categoryResponse.ok) setAdminCategories(await categoryResponse.json());
+      if (groupResponse.ok) setAdminGroups(await groupResponse.json());
     }
     useEffect(() => { void loadAdminData(); }, []);
 
@@ -653,13 +837,79 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
       const response = await fetch("/api/v1/priority-matrix", { method: "PUT", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ matrix }) });
       setNotice(response.ok ? "Priority matrix saved." : "Priority matrix must be a valid 5 × 5 matrix.");
     }
-    async function createTemplate(event: FormEvent<HTMLFormElement>) {
+    function editTemplate(template: AdminTemplate) {
+      setEditingTemplateId(template.id);
+      setNewTemplate({
+        name: template.name,
+        description: template.description ?? "",
+        ticket_type_id: String(template.ticket_type_id),
+        team_id: template.team_id == null ? "" : String(template.team_id),
+        prefilled: JSON.stringify(template.prefilled ?? {}, null, 2),
+        is_active: template.is_active,
+        show_on_portal: template.show_on_portal,
+        sort_order: template.sort_order,
+      });
+    }
+    function resetTemplateDraft() {
+      setEditingTemplateId(null);
+      setNewTemplate({
+        name: "",
+        description: "",
+        ticket_type_id: "",
+        team_id: "",
+        prefilled: "{}",
+        is_active: true,
+        show_on_portal: false,
+        sort_order: 0,
+      });
+    }
+    function templateFieldsForRole(role: "Administrator" | "Technician" | "Requester") {
+      let prefilledKeys: string[] = [];
+      try {
+        prefilledKeys = Object.keys(JSON.parse(newTemplate.prefilled) as Record<string, unknown>);
+      } catch {
+        return [];
+      }
+      const selected = types.find((type) => type.id === Number(newTemplate.ticket_type_id));
+      if (!selected) return [];
+      const allowedIds = new Set(selected.fields
+        .filter((mapping) =>
+          mapping.visible_to_roles.includes(role)
+          && mapping.editable_by_roles.includes(role)
+          && (role !== "Requester" || mapping.show_on_portal),
+        )
+        .map((mapping) => mapping.field_definition_id));
+      return fields
+        .filter((field) => prefilledKeys.includes(field.key) && allowedIds.has(field.id))
+        .map((field) => field.label);
+    }
+    async function saveTemplate(event: FormEvent<HTMLFormElement>) {
       event.preventDefault();
       try {
-        const response = await fetch("/api/v1/templates", { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ name: newTemplate.name, ticket_type_id: Number(newTemplate.ticket_type_id), prefilled: JSON.parse(newTemplate.prefilled) }) });
+        const response = await fetch(
+          editingTemplateId ? `/api/v1/ticket-templates/${editingTemplateId}` : "/api/v1/ticket-templates",
+          {
+            method: editingTemplateId ? "PATCH" : "POST",
+            headers: { ...headers, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: newTemplate.name,
+              description: newTemplate.description,
+              ticket_type_id: Number(newTemplate.ticket_type_id),
+              team_id: newTemplate.team_id ? Number(newTemplate.team_id) : null,
+              prefilled: JSON.parse(newTemplate.prefilled),
+              is_active: newTemplate.is_active,
+              show_on_portal: newTemplate.show_on_portal,
+              sort_order: Number(newTemplate.sort_order),
+            }),
+          },
+        );
         if (!response.ok) throw new Error();
-        setNewTemplate({ name: "", ticket_type_id: "", prefilled: "{}" }); setNotice("Template saved."); await loadAdminData();
-      } catch { setNotice("Template JSON is invalid or the ticket type is unavailable."); }
+        resetTemplateDraft();
+        setNotice("Template saved.");
+        await loadAdminData();
+      } catch {
+        setNotice("Template could not be saved. Check the JSON, field values, and ticket type.");
+      }
     }
     async function createCategory(event: FormEvent<HTMLFormElement>) {
       event.preventDefault();
@@ -674,13 +924,58 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
       {notice && <p className="settings-saved" role="status">{notice}</p>}
       {section === "Ticket types" && <div className="admin-layout"><section className="table-card admin-list"><div className="panel-card-heading"><h2>Ticket types</h2><button className="secondary-button" onClick={() => { const fresh = { id: 0, name: "New ticket type", itil_class: "REQUEST", default_priority: 3, fields: [] }; setSelectedType(fresh); setDraft(fresh); }}>New type</button></div>{types.map((type) => <button className={`admin-list-row ${selectedType?.id === type.id ? "selected" : ""}`} key={type.id} onClick={() => editType(type)}><span><strong>{type.name}</strong><small>{type.itil_class} · {type.fields.length} fields</small></span><b>›</b></button>)}</section>{draft && <section className="table-card admin-editor"><div className="panel-card-heading"><div><h2>Ticket type editor</h2><span>Drag order with the arrows, then preview the portal form.</span></div><button className="primary-button" onClick={() => void saveType()}>Save type</button></div><div className="form-grid"><label>Name<input value={draft.name} onChange={(event) => updateDraft({ name: event.target.value })} required /></label><label>ITIL class<select value={draft.itil_class} onChange={(event) => updateDraft({ itil_class: event.target.value })}><option value="INCIDENT">Incident</option><option value="REQUEST">Service Request</option><option value="PROBLEM">Problem</option><option value="CHANGE">Change</option></select></label><label>Default priority<input type="number" min="1" max="5" value={draft.default_priority} onChange={(event) => updateDraft({ default_priority: Number(event.target.value) })} /></label></div><h3 className="admin-subtitle">Field layout</h3>      <div className="field-layout">{draft.fields.map((field, index) => { const definition = fields.find((item) => item.id === field.field_definition_id); const replace = (changes: Partial<typeof field>) => updateDraft({ fields: draft.fields.map((item, itemIndex) => itemIndex === index ? { ...item, ...changes } : item) }); return <div className="field-layout-row" key={`${field.field_definition_id}-${index}`} draggable onDragStart={() => setDraggedIndex(index)} onDragOver={(event) => event.preventDefault()} onDrop={() => dropField(index)}><span className="drag-handle">⋮⋮</span><strong>{definition?.label ?? `Field ${field.field_definition_id}`}</strong><select value={field.page} onChange={(event) => replace({ page: event.target.value })}><option value="details">Details</option><option value="classification">Classification</option><option value="schedule">Schedule</option></select><label className="inline-check"><input type="checkbox" checked={field.required} onChange={(event) => replace({ required: event.target.checked })} /> Required</label><label className="inline-check"><input type="checkbox" checked={field.show_on_portal} onChange={(event) => replace({ show_on_portal: event.target.checked })} /> Visible</label><label className="inline-check"><input type="checkbox" checked={field.editable_by_roles.includes("Requester")} onChange={(event) => replace({ editable_by_roles: event.target.checked ? [...new Set([...field.editable_by_roles, "Requester"])] : field.editable_by_roles.filter((role) => role !== "Requester") })} /> Requester editable</label><input className="field-default-input" placeholder="Default value" value={field.default_value == null ? "" : String(field.default_value)} onChange={(event) => replace({ default_value: event.target.value || null })} /><input className="field-condition-input" placeholder="Condition JSON" value={Object.keys(field.show_condition ?? {}).length ? JSON.stringify(field.show_condition) : ""} onChange={(event) => { try { replace({ show_condition: event.target.value ? JSON.parse(event.target.value) : {} }); } catch { /* wait for valid JSON */ } }} /><button type="button" className="icon-button" onClick={() => moveField(index, -1)}>↑</button><button type="button" className="icon-button" onClick={() => moveField(index, 1)}>↓</button></div>; })}</div><div className="field-picker-row">{fields.filter((field) => !draft.fields.some((item) => item.field_definition_id === field.id)).map((field) => <button key={field.id} className="secondary-button" onClick={() => updateDraft({ fields: [...draft.fields, { field_definition_id: field.id, order: draft.fields.length, page: "details", required: false, visible_to_roles: ["Administrator", "Technician", "Requester"], editable_by_roles: ["Administrator", "Technician"], default_value: null, show_on_portal: false, show_condition: {} }] })}>+ {field.label}</button>)}</div><h3 className="admin-subtitle">Live portal preview</h3><div className="form-preview">{draft.fields.map((field) => { const definition = fields.find((item) => item.id === field.field_definition_id); return <label key={field.field_definition_id}>{definition?.label ?? "Field"}{field.required && <span> *</span>}<input placeholder={String(field.default_value ?? `Enter ${definition?.label?.toLowerCase() ?? "value"}`)} disabled /></label>; })}</div></section>}</div>}
       {section === "Field catalogue" && <div className="admin-two-column"><section className="table-card"><div className="panel-card-heading"><h2>Field catalogue</h2><span>{fields.length} definitions</span></div>{fields.map((field) => <div className="catalogue-row" key={field.id}><strong>{field.label}</strong><span>{field.key}</span><small>{field.type}{field.is_system ? " · System" : ""}</small></div>)}</section><form className="table-card admin-form-card" onSubmit={createField}><h2>Add custom field</h2><p>Create a field once and reuse it across ticket types.</p><label>Key<input value={newField.key} onChange={(event) => setNewField({ ...newField, key: event.target.value })} placeholder="business_unit" required /></label><label>Label<input value={newField.label} onChange={(event) => setNewField({ ...newField, label: event.target.value })} placeholder="Business unit" required /></label><label>Type<select value={newField.type} onChange={(event) => setNewField({ ...newField, type: event.target.value })}>{["text", "textarea", "number", "date", "datetime", "select", "multiselect", "checkbox", "url"].map((type) => <option key={type}>{type}</option>)}</select></label><button className="primary-button" type="submit">Add field</button></form></div>}
-      {section === "Templates" && <div className="admin-two-column"><section className="table-card"><div className="panel-card-heading"><h2>Templates</h2><span>{templates.length} saved</span></div>{templates.map((template) => <div className="catalogue-row" key={template.id}><strong>{template.name}</strong><span>{types.find((type) => type.id === template.ticket_type_id)?.name ?? "Ticket type"}</span><small>{Object.keys(template.prefilled).length} prefilled fields</small></div>)}</section><form className="table-card admin-form-card" onSubmit={createTemplate}><h2>New template</h2><label>Name<input value={newTemplate.name} onChange={(event) => setNewTemplate({ ...newTemplate, name: event.target.value })} required /></label><label>Ticket type<select value={newTemplate.ticket_type_id} onChange={(event) => setNewTemplate({ ...newTemplate, ticket_type_id: event.target.value })} required><option value="">Select type</option>{types.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}</select></label><label>Prefilled JSON<textarea value={newTemplate.prefilled} onChange={(event) => setNewTemplate({ ...newTemplate, prefilled: event.target.value })} rows={7} /></label><button className="primary-button" type="submit">Save template</button></form></div>}
+      {section === "Templates" && (
+        <div className="admin-two-column template-admin-layout">
+          <section className="table-card template-admin-list">
+            <div className="panel-card-heading">
+              <div><h2>Templates</h2><span>{templates.length} saved in this entity</span></div>
+              <button type="button" className="secondary-button" onClick={resetTemplateDraft}>New template</button>
+            </div>
+            {templates.map((template) => (
+              <button
+                type="button"
+                className={`template-admin-row${editingTemplateId === template.id ? " selected" : ""}`}
+                key={template.id}
+                onClick={() => editTemplate(template)}
+              >
+                <strong>{template.name}</strong>
+                <span>{types.find((type) => type.id === template.ticket_type_id)?.name ?? "Ticket type"}</span>
+                <small>{template.is_active ? "Active" : "Inactive"} · {template.show_on_portal ? "Portal visible" : "Internal"} · {Object.keys(template.prefilled ?? {}).length} prefilled fields</small>
+                {template.description && <small>{template.description}</small>}
+              </button>
+            ))}
+            {!templates.length && <div className="empty-table"><strong>No templates yet</strong><span>Create a template to offer a reusable ticket starting point.</span></div>}
+          </section>
+          <form className="table-card admin-form-card" onSubmit={saveTemplate}>
+            <h2>{editingTemplateId ? "Edit template" : "New template"}</h2>
+            <label>Name<input value={newTemplate.name} onChange={(event) => setNewTemplate({ ...newTemplate, name: event.target.value })} required maxLength={160} /></label>
+            <label>Description<textarea value={newTemplate.description} onChange={(event) => setNewTemplate({ ...newTemplate, description: event.target.value })} rows={2} maxLength={500} placeholder="A short description shown in the picker" /></label>
+            <label>Ticket type<select value={newTemplate.ticket_type_id} onChange={(event) => setNewTemplate({ ...newTemplate, ticket_type_id: event.target.value })} required><option value="">Select type</option>{types.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}</select></label>
+            <label>Team<select value={newTemplate.team_id} onChange={(event) => setNewTemplate({ ...newTemplate, team_id: event.target.value })}><option value="">Global template</option>{adminGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
+            <label>Prefilled JSON<textarea value={newTemplate.prefilled} onChange={(event) => setNewTemplate({ ...newTemplate, prefilled: event.target.value })} rows={7} spellCheck={false} /></label>
+            <label className="settings-toggle"><span><strong>Active</strong><small>Available in the ticket template picker.</small></span><input type="checkbox" checked={newTemplate.is_active} onChange={(event) => setNewTemplate({ ...newTemplate, is_active: event.target.checked })} /></label>
+            <label className="settings-toggle"><span><strong>Show on portal</strong><small>Allow Requesters to use this template when its ticket type is portal-visible.</small></span><input type="checkbox" checked={newTemplate.show_on_portal} onChange={(event) => setNewTemplate({ ...newTemplate, show_on_portal: event.target.checked })} /></label>
+            <label>Sort order<input type="number" min="0" value={newTemplate.sort_order} onChange={(event) => setNewTemplate({ ...newTemplate, sort_order: Number(event.target.value) })} /></label>
+            <div className="template-role-preview">
+              <h3>Live prefill preview by role</h3>
+              {(["Administrator", "Technician", "Requester"] as const).map((role) => {
+                const visibleFields = templateFieldsForRole(role);
+                return <div key={role}><strong>{role}</strong><span>{visibleFields.length ? visibleFields.join(", ") : "No prefilled fields visible"}</span></div>;
+              })}
+            </div>
+            <div className="template-admin-actions">
+              <button className="primary-button" type="submit">{editingTemplateId ? "Save changes" : "Save template"}</button>
+              {editingTemplateId && <button type="button" className="secondary-button" onClick={resetTemplateDraft}>Cancel edit</button>}
+            </div>
+          </form>
+        </div>
+      )}
       {section === "Priority matrix" && <section className="table-card matrix-card"><div className="panel-card-heading"><div><h2>Priority matrix</h2><span>Rows are urgency, columns are impact.</span></div><button className="primary-button" onClick={() => void saveMatrix()}>Save matrix</button></div><div className="matrix-grid"><div /><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span>{matrix.map((row, rowIndex) => <><strong key={`label-${rowIndex}`}>{rowIndex + 1}</strong>{row.map((value, columnIndex) => <input key={`${rowIndex}-${columnIndex}`} type="number" min="1" max="5" value={value} onChange={(event) => setMatrix(matrix.map((currentRow, currentRowIndex) => currentRowIndex === rowIndex ? currentRow.map((current, currentColumn) => currentColumn === columnIndex ? Number(event.target.value) : current) : currentRow))} />)}</>)}</div></section>}
       {section === "Categories" && <div className="admin-two-column"><section className="table-card"><div className="panel-card-heading"><h2>Category tree</h2><span>{adminCategories.length} categories · up to four levels</span></div>{adminCategories.length ? adminCategories.map((category) => { let level = 0; let parent = category.parent_id; while (parent && level < 4) { level += 1; parent = adminCategories.find((item) => item.id === parent)?.parent_id; } return <div className="catalogue-row category-tree-row" key={category.id} style={{ paddingLeft: `${level * 20}px` }}><strong>{level ? "↳ " : ""}{category.name}</strong><span>{level === 0 ? "Root" : `Level ${level + 1}`}</span><small>Entity scoped</small></div>; }) : <div className="empty-table"><strong>No categories configured</strong><span>Add the first category to start the service catalogue tree.</span></div>}</section><form className="table-card admin-form-card" onSubmit={createCategory}><h2>Add category</h2><p>Categories are restricted to the signed-in entity and may be nested four levels deep.</p><label>Name<input value={newCategory.name} onChange={(event) => setNewCategory({ ...newCategory, name: event.target.value })} required minLength={2} /></label><label>Parent<select value={newCategory.parent_id} onChange={(event) => setNewCategory({ ...newCategory, parent_id: event.target.value })}><option value="">Root category</option>{adminCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><button className="primary-button" type="submit">Add category</button></form></div>}
     </section>;
   }
 
-  if (currentUser?.profile.name === "Administrator") return <AdminPanel token={adminToken} />;
+  if (hasAdminRights) return <AdminPanel token={adminToken} />;
   return <section className="settings-panel">
     <div className="page-heading"><div><p className="kicker">WORKSPACE SETTINGS</p><h1>Settings</h1><p className="subheading">Manage your personal workspace preferences.</p></div><button className="primary-button" onClick={saveSettings}>Save changes</button></div>
     {saved && <p className="settings-saved" role="status">Settings saved.</p>}

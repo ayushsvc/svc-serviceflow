@@ -412,6 +412,7 @@ async def test_profile_right_seeding_is_additive_and_preserves_existing_values()
     assert profiles["Technician"].rights == {
         "ticket:view_queue": False,
         "ticket:claim": True,
+        "ticket:bulk_edit": True,
         "custom": True,
     }
     assert profiles["Administrator"].rights == {
@@ -419,6 +420,8 @@ async def test_profile_right_seeding_is_additive_and_preserves_existing_values()
         "custom": True,
         "ticket:view_all": True,
         "ticket:claim": True,
+        "ticket:bulk_edit": True,
+        "ticket:assign_any": True,
     }
     assert changed
 

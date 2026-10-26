@@ -340,11 +340,21 @@ async def test_rich_text_is_sanitized_for_ticket_subresources_and_templates(real
         json={
             "name": f"Sanitized template {uuid4().hex}",
             "ticket_type_id": incident.id,
-            "prefilled": {"details": attack},
+            "prefilled": {"details": attack, "source": "EMAIL", "agent": technician.id},
+            "show_on_portal": True,
         },
     )
     assert template.status_code == 201, template.text
     assert template.json()["prefilled"]["details"] == "<p>Safe</p>"
+    state["user"] = requester
+    requester_templates = await client.get("/api/v1/templates")
+    assert requester_templates.status_code == 200, requester_templates.text
+    requester_template = next(
+        item for item in requester_templates.json() if item["id"] == template.json()["id"]
+    )
+    assert requester_template["prefilled"] == {"details": "<p>Safe</p>"}
+    assert requester_template["team_id"] is None
+    state["user"] = admin
 
     notification = await client.post(
         "/api/v1/notification-templates",
