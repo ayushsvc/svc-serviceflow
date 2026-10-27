@@ -39,7 +39,7 @@ async def bulk_http():
             "technician": Profile(
                 name=f"Slice 3 tech {suffix}",
                 interface="helpdesk",
-                rights={"ticket:view_queue": True, "ticket:claim": True, "ticket:bulk_edit": True},
+                rights={"ticket:view_queue": True, "ticket:claim": True, "ticket:bulk_edit": True, "ticket:self_claim": True, "ticket:view_unassigned": True},
             ),
             "requester": Profile(
                 name=f"Slice 3 requester {suffix}",

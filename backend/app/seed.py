@@ -119,12 +119,16 @@ async def seed_profile_rights(profiles: dict[str, Profile]) -> list[str]:
             "ticket:view_queue": True,
             "ticket:claim": True,
             "ticket:bulk_edit": True,
+            "ticket:self_claim": False,
+            "ticket:view_unassigned": False,
         },
         "Administrator": {
             "ticket:view_all": True,
             "ticket:claim": True,
             "ticket:bulk_edit": True,
             "ticket:assign_any": True,
+            "ticket:self_claim": True,
+            "ticket:view_unassigned": True,
         },
     }
     changed = []

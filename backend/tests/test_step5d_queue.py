@@ -56,7 +56,7 @@ async def step5d_http():
         custom_profile = Profile(
             name=f"Step5d custom queue {suffix}",
             interface="helpdesk",
-            rights={"ticket:view_queue": True, "ticket:claim": True},
+            rights={"ticket:view_queue": True, "ticket:claim": True, "ticket:self_claim": True, "ticket:view_unassigned": True},
         )
         db.add(custom_profile)
         entities = {
@@ -91,7 +91,7 @@ async def step5d_http():
                 email=f"step5d-b-technician-{suffix}@example.test",
                 password_hash="test-only",
                 name="Queue technician B",
-                profile=technician_profile,
+                profile=custom_profile,
                 entity=entities["B"],
             ),
             "B_requester": User(
@@ -412,6 +412,8 @@ async def test_profile_right_seeding_is_additive_and_preserves_existing_values()
         "ticket:view_queue": False,
         "ticket:claim": True,
         "ticket:bulk_edit": True,
+        "ticket:self_claim": False,
+        "ticket:view_unassigned": False,
         "custom": True,
     }
     assert profiles["Administrator"].rights == {
@@ -421,6 +423,8 @@ async def test_profile_right_seeding_is_additive_and_preserves_existing_values()
         "ticket:claim": True,
         "ticket:bulk_edit": True,
         "ticket:assign_any": True,
+        "ticket:self_claim": True,
+        "ticket:view_unassigned": True,
     }
     assert changed
 

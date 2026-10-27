@@ -5,6 +5,8 @@ import AssignPicker from "./components/AssignPicker";
 import RequesterTicketForm from "./components/RequesterTicketForm";
 import AttachmentDropzone from "./components/AttachmentDropzone";
 import ReplyComposer from "./components/ReplyComposer";
+import { SafeHtml } from "./components/SafeHtml";
+import { TicketAttachments } from "./components/TicketAttachments";
 import { AttachmentItem, revokePreview, unsentCount, uploadItems } from "./lib/attachments";
 
 type TokenPair = { access_token: string; refresh_token: string };
@@ -40,6 +42,7 @@ type Ticket = {
   team_id?: number | null;
   team_name?: string | null;
   category_id?: number | null;
+  ticket_type_id?: number | null;
   requester_name?: string | null;
   requester_active?: boolean | null;
   requester_vip?: boolean | null;
@@ -204,6 +207,10 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   const [queueFilter, setQueueFilter] = useState<"all" | "mine" | "teams" | "unassigned">("all");
   const [queueCounts, setQueueCounts] = useState({ all: 0, mine: 0, teams: 0, unassigned: 0 });
   const queueAccess = Boolean(currentUser?.profile.rights?.["ticket:view_queue"] && !currentUser?.profile.rights?.["ticket:view_all"] && !currentUser?.profile.rights?.["*"]);
+  const viewAllAccess = Boolean(currentUser?.profile.rights?.["ticket:view_all"] || currentUser?.profile.rights?.["*"]);
+  const tabsAccess = queueAccess || viewAllAccess;
+  const canSelfClaim = currentUser?.profile.rights?.["ticket:self_claim"] === true || currentUser?.profile.rights?.["*"] === true;
+  const canViewUnassigned = currentUser?.profile.rights?.["ticket:view_unassigned"] === true || currentUser?.profile.rights?.["*"] === true;
   const canAssignTickets = Boolean(
     currentUser?.profile.rights?.["ticket:assign_any"]
     || currentUser?.profile.rights?.["ticket:bulk_edit"]
@@ -225,7 +232,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
       sort: listSort,
       direction: listDirection,
     });
-    if (queueAccess && queueFilter !== "all") params.set("queue", queueFilter);
+    if (tabsAccess && queueFilter !== "all") params.set("queue", queueFilter);
     if (query.trim()) params.set("search", query.trim());
     if (statusFilter !== "All tickets") params.set("status", statusFilter);
     if (priorityFilter !== "All priorities") params.set("priority", priorityFilter);
@@ -239,7 +246,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     setTickets(result.items);
     setListTotal(result.total);
     setPriorityOptions(result.priority_options ?? []);
-    if (queueAccess) {
+    if (tabsAccess) {
       const queueResponse = await fetch("/api/v1/tickets/queue-counts", { headers: apiHeaders });
       if (queueResponse.ok) setQueueCounts(await queueResponse.json() as typeof queueCounts);
     }
@@ -340,7 +347,8 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     setError("");
     await loadTickets();
   }
-  useEffect(() => { void loadTickets(); }, [query, statusFilter, priorityFilter, listPage, listPageSize, listSort, listDirection, queueFilter, queueAccess]);
+  useEffect(() => { void loadTickets(); }, [query, statusFilter, priorityFilter, listPage, listPageSize, listSort, listDirection, queueFilter, tabsAccess]);
+  useEffect(() => { if (viewAllAccess) { setQueueFilter("unassigned"); setListPage(1); } }, [viewAllAccess]);
   useEffect(() => {
     void fetch("/api/v1/auth/me", { headers: apiHeaders }).then((response) => response.ok ? response.json() : null).then((user: CurrentUser | null) => setCurrentUser(user));
   }, []);
@@ -578,12 +586,15 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         <div className="page-heading"><div><p className="kicker">SERVICE OPERATIONS</p><h1>{activeNav === "Tickets" ? "Tickets" : activeNav}</h1><p className="subheading">{currentUser?.profile.interface === "self_service" ? "Report an incident or request a service, then track your tickets here." : queueAccess ? "Tickets assigned to you, your teams, or awaiting a technician." : "Manage, prioritize, and resolve requests across your organization."}</p></div><button className="primary-button" onClick={() => setShowCreate(true)}><span>+</span> Create ticket</button></div>
         <div className="metric-row"><div className="metric"><span className="metric-label">Open tickets</span><strong>{openCount}</strong><small className="metric-up">+12% <span>vs last week</span></small></div><div className="metric"><span className="metric-label">Awaiting response</span><strong>{tickets.filter((ticket) => ticket.status === "PENDING").length}</strong><small>Needs attention</small></div><div className="metric"><span className="metric-label">SLA compliance</span><strong>94.2%</strong><small className="metric-up">+2.4% <span>vs last month</span></small></div><div className="metric"><span className="metric-label">Avg. resolution</span><strong>6h 24m</strong><small>Across all tickets</small></div></div>
         <section className="table-card">
-          {queueAccess && <div className="list-controls" aria-label="Ticket queues">
-            {([
+          {tabsAccess && <div className="list-controls" aria-label="Ticket queues">
+            {(viewAllAccess ? [
+              ["unassigned", "Unassigned", queueCounts.unassigned],
+              ["all", "All tickets", queueCounts.all],
+            ] as const : [
               ["all", "All visible", queueCounts.all],
               ["mine", "My tickets", queueCounts.mine],
               ["teams", "My teams", queueCounts.teams],
-              ["unassigned", "Unassigned", queueCounts.unassigned],
+              ...(canViewUnassigned ? [["unassigned", "Unassigned", queueCounts.unassigned] as const] : []),
             ] as const).map(([queue, label, count]) => <button key={queue} type="button" className={`secondary-button ${queueFilter === queue ? "button-active" : ""}`} aria-pressed={queueFilter === queue} onClick={() => { setQueueFilter(queue); setListPage(1); }}>{label} <b>{count}</b></button>)}
           </div>}
           <div className="team-counts" aria-label="Team ticket counts">{teamCounts.map((team) => <span className="team-count" key={team.team_id ?? "unassigned"}>Team {team.team_id ?? "Unassigned"} <b>{team.count}</b></span>)}</div>
@@ -619,7 +630,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
           <div className="profile-column-chooser"><strong>Choose columns</strong>{ticketListColumns.map(({ key, label }) => <label key={key}><input type="checkbox" checked={listColumns.includes(key)} onChange={(event) => setListColumns((columns) => event.target.checked ? [...columns, key] : columns.length > 1 ? columns.filter((column) => column !== key) : columns)} />{label}</label>)}</div>
           {error && <p className="error" role="alert">{error}</p>}
           <div className="table-meta"><span><strong>{listTotal}</strong> tickets</span><button className="clear-button" onClick={clearFilters}>Clear filters</button></div>
-          <div className="ticket-table-wrap"><table><thead><tr><th className="check-col"><input type="checkbox" aria-label="Select all tickets" /></th>{listColumns.map((column) => <th key={column}>{ticketListColumns.find((item) => item.key === column)?.label ?? column}</th>)}<th /></tr></thead><tbody>{filteredTickets.map((ticket) => <tr key={ticket.id} className={selected?.id === ticket.id ? "row-selected" : ""} onClick={() => void selectTicket(ticket)}><td className="check-col" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ticket ${ticket.id}`} /></td>{listColumns.map((column) => <td key={column}>{renderTicketColumn(ticket, column)}</td>)}<td>{queueAccess && !ticket.assignee_id && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void claimTicket(ticket); }}>Claim</button>}{canAssignTickets && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void selectTicket(ticket); setAssignmentPickerTicketId(ticket.id); }}>Assign</button>}<button className="row-menu" onClick={(event) => event.stopPropagation()}>•••</button></td></tr>)}</tbody></table>{!filteredTickets.length && <div className="empty-table"><strong>{queueAccess ? "No tickets in this queue" : "No tickets found"}</strong><span>{queueAccess ? "Try another queue or refresh the list." : "Try changing your search or filters."}</span></div>}</div>
+          <div className="ticket-table-wrap"><table><thead><tr><th className="check-col"><input type="checkbox" aria-label="Select all tickets" /></th>{listColumns.map((column) => <th key={column}>{ticketListColumns.find((item) => item.key === column)?.label ?? column}</th>)}<th /></tr></thead><tbody>{filteredTickets.map((ticket) => <tr key={ticket.id} className={selected?.id === ticket.id ? "row-selected" : ""} onClick={() => void selectTicket(ticket)}><td className="check-col" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ticket ${ticket.id}`} /></td>{listColumns.map((column) => <td key={column}>{renderTicketColumn(ticket, column)}</td>)}<td>{queueAccess && canSelfClaim && !ticket.assignee_id && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void claimTicket(ticket); }}>Claim</button>}{canAssignTickets && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void selectTicket(ticket); setAssignmentPickerTicketId(ticket.id); }}>Assign</button>}<button className="row-menu" onClick={(event) => event.stopPropagation()}>•••</button></td></tr>)}</tbody></table>{!filteredTickets.length && <div className="empty-table"><strong>{queueAccess ? "No tickets in this queue" : "No tickets found"}</strong><span>{queueAccess ? "Try another queue or refresh the list." : "Try changing your search or filters."}</span></div>}</div>
           <div className="pagination-controls"><button disabled={listPage <= 1} onClick={() => setListPage((page) => page - 1)}>Previous</button><span>Page {listPage}</span><button disabled={listPage * listPageSize >= listTotal} onClick={() => setListPage((page) => page + 1)}>Next</button></div>
         </section>
         </>}
@@ -642,7 +653,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         onAssigned={onTicketAssigned}
       /> : null;
     })()}
-    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{statusLabels[selected.status] ?? selected.status}</span>{queueAccess && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}{canAssignTickets && <button className="secondary-button" onClick={() => setAssignmentPickerTicketId(selected.id)}>Assign</button>}</div><div className="assignment-summary"><span>Priority: <strong>{selected.priority_label ?? `Priority ${selected.priority}`}{requesterAccess ? "" : ` (${selected.priority})`}</strong></span><span>Assignee: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span></div><div className="drawer-tabs"><button className="tab active">Activity</button><button className="tab">Details</button></div><div className="drawer-content"><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><ReplyComposer ticketId={selected.id} headers={apiHeaders} onSent={() => selectTicket(selected)} /><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>Employee</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div><div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div></dl></section></div></aside>}
+    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{statusLabels[selected.status] ?? selected.status}</span>{queueAccess && canSelfClaim && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}{canAssignTickets && <button className="primary-button assign-primary" onClick={() => setAssignmentPickerTicketId(selected.id)}>Assign</button>}</div><div className="assignment-summary"><span>Raised by: <strong>{selected.requester_name ?? "Unknown"}</strong></span><span>Assigned to: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Type: <strong>{ticketTypes.find((item) => item.id === selected.ticket_type_id)?.name ?? "—"}</strong></span><span>Created: <strong>{new Date(selected.opened_at).toLocaleString()}</strong></span><span>Priority: <strong>{selected.priority_label ?? `Priority ${selected.priority}`}{requesterAccess ? "" : ` (${selected.priority})`}</strong></span>{!requesterAccess && <span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span>}</div><div className="drawer-tabs"><button className="tab active">Activity</button><button className="tab">Details</button></div><div className="drawer-content"><section className="drawer-section"><h3>Description</h3><SafeHtml className="ticket-description" html={selected.description} /></section><TicketAttachments ticketId={selected.id} headers={apiHeaders} /><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><ReplyComposer ticketId={selected.id} headers={apiHeaders} onSent={() => selectTicket(selected)} /><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>{selected.requester_name ?? "Unknown"}</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div>{!requesterAccess && <div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div>}</dl></section></div></aside>}
     {showCreate && (
       <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreate(); }}>
         <form

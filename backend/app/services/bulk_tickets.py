@@ -218,9 +218,15 @@ async def apply_ticket_update(
     original_custom_fields = dict(ticket.custom_fields or {})
     changes = dict(values)
     explicit_priority = changes.get("priority") if "priority" in changes else None
+    unassign_reset = False
     if "assignee_id" in changes and changes["assignee_id"] != ticket.assignee_id:
         if changes["assignee_id"] is None and ticket.assignee_id is not None:
-            changes.setdefault("status", "NEW")
+            if "status" not in changes:
+                if ticket.status == "ASSIGNED":
+                    # Returning to the queue is an assignment action, not a manual status transition.
+                    unassign_reset = True
+                elif ticket.status != "NEW":
+                    raise HTTPException(status_code=409, detail="A ticket can only be unassigned while its status is Assigned")
         elif changes["assignee_id"] is not None and ticket.status == "NEW":
             changes.setdefault("status", "ASSIGNED")
     if "description" in changes and isinstance(changes["description"], str):
@@ -305,16 +311,22 @@ async def apply_ticket_update(
 
     if "assignee_id" in changes and changes["assignee_id"] != ticket.assignee_id and ticket.status == "NEW" and changes["assignee_id"] is not None:
         changes["status"] = "ASSIGNED"
-    if (
-        "assignee_id" in changes
-        and ticket.assignee_id is not None
-        and changes["assignee_id"] is None
-        and ticket.status != "NEW"
-    ):
-        changes["status"] = "NEW"
     if changes.get("status") == ticket.status:
         changes.pop("status")
-    if "status" in changes:
+    skip_status_rules = False
+    if unassign_reset:
+        changes["status"] = "NEW"
+        configured_workflow = await db.scalar(
+            select(TicketWorkflow.id).where(
+                TicketWorkflow.entity_id == user.entity_id,
+                TicketWorkflow.record_type == "ticket",
+                TicketWorkflow.is_active.is_(True),
+            )
+        )
+        # Without a configured workflow the default transition table does not list ASSIGNED -> NEW.
+        # Unassigning is an assignment action, so the reset is applied directly in that case only.
+        skip_status_rules = configured_workflow is None
+    if "status" in changes and not skip_status_rules:
         await _apply_status(db, ticket, user, changes)
 
     if explicit_priority is not None:

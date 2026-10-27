@@ -44,6 +44,15 @@ async def assign_http():
                 )
             ).all()
         }
+        # The seeded Technician no longer self-claims or sees unassigned tickets, so this fixture
+        # uses a copy of the seeded rights with the two new rights granted explicitly.
+        technician_profile = Profile(
+            name=f"Assignment technician {suffix}",
+            interface=profiles["Technician"].interface,
+            rights={**(profiles["Technician"].rights or {}), "ticket:self_claim": True, "ticket:view_unassigned": True},
+        )
+        db.add(technician_profile)
+        profiles["Technician"] = technician_profile
         entities = {
             key: Entity(name=f"Assignment {key} {suffix}")
             for key in ("A", "B")
@@ -155,6 +164,7 @@ async def assign_http():
             await db.execute(delete(User).where(User.id.in_(list(ids.values()))))
             await db.execute(delete(Group).where(Group.id.in_(group_ids)))
             await db.execute(delete(Entity).where(Entity.id.in_(entity_ids)))
+            await db.execute(delete(Profile).where(Profile.name == f"Assignment technician {suffix}"))
             await db.commit()
         await engine.dispose()
 

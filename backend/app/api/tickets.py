@@ -66,9 +66,13 @@ def ticket_route_team_id():
     return func.coalesce(assigned_group, ticket_type_group)
 
 
+def unassigned_predicate() -> ColumnElement[bool]:
+    return and_(Ticket.assignee_id.is_(None), ticket_route_team_id().is_(None))
+
+
 def ticket_visibility_scope(user: User, queue: str | None = None) -> ColumnElement[bool]:
     if has_profile_right(user, "ticket:view_all"):
-        return true()
+        return unassigned_predicate() if queue == "unassigned" else true()
     if has_profile_right(user, "ticket:own_only"):
         return Ticket.requester_id == user.id
     if not has_profile_right(user, "ticket:view_queue"):
@@ -83,7 +87,7 @@ def ticket_visibility_scope(user: User, queue: str | None = None) -> ColumnEleme
     route_team_id = ticket_route_team_id()
     assigned_to_team = route_team_id.in_(user_group_ids)
     assigned_to_user = Ticket.assignee_id == user.id
-    unassigned = and_(Ticket.assignee_id.is_(None), route_team_id.is_(None))
+    unassigned = unassigned_predicate() if has_profile_right(user, "ticket:view_unassigned") else false()
     if queue == "mine":
         return and_(assigned_to_user, or_(route_team_id.is_(None), assigned_to_team))
     if queue == "teams":
@@ -118,6 +122,7 @@ def ticket_response_data(ticket: Ticket, user: User) -> dict[str, Any]:
         for field in TicketRead.model_fields
         if field != "priority_label" and hasattr(ticket, field)
     }
+    data["description"] = sanitize_rich_text(ticket.description or "")
     data["priority_label"] = priority_label(
         ticket.priority,
         requester=field_role_for_user(user) == "Requester",
@@ -421,6 +426,7 @@ async def list_tickets(
     rows = [
         {
             **{column: getattr(ticket, column) for column in TicketRead.model_fields if hasattr(ticket, column)},
+            "description": sanitize_rich_text(ticket.description or ""),
             "requester_name": requester.name if user.profile.interface != "self_service" else None,
             "requester_active": requester.is_active if user.profile.interface != "self_service" else None,
             "requester_vip": False if user.profile.interface != "self_service" else None,
@@ -462,9 +468,8 @@ async def ticket_team_counts(user: CurrentUser, db: DbSession) -> list[dict[str,
         select(func.count(Ticket.id)).where(
             Ticket.entity_id == user.entity_id,
             Ticket.deleted_at.is_(None),
-            Ticket.assignee_id.is_(None),
-            route_team_id.is_(None),
-            ticket_visibility_scope(user, "unassigned") if has_profile_right(user, "ticket:view_queue") else ticket_visibility_scope(user),
+            unassigned_predicate(),
+            ticket_visibility_scope(user, "unassigned") if has_profile_right(user, "ticket:view_queue") or has_profile_right(user, "ticket:view_all") else ticket_visibility_scope(user),
         )
     ) or 0
     result.append({"team_id": None, "team_name": "Unassigned", "count": unassigned})
@@ -646,14 +651,20 @@ async def get_ticket(ticket_id: int, user: CurrentUser, db: DbSession) -> dict:
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     assigned_name = await db.scalar(select(User.name).where(User.id == ticket.assignee_id)) if ticket.assignee_id else None
+    requester_name = await db.scalar(select(User.name).where(User.id == ticket.requester_id))
     routed_team_id = await db.scalar(select(ticket_route_team_id()).where(Ticket.id == ticket.id))
     routed_team_name = await db.scalar(select(Group.name).where(Group.id == routed_team_id)) if routed_team_id else None
-    return {
+    detail = {
         **ticket_response_data(ticket, user),
+        "requester_name": requester_name,
         "assignee_name": assigned_name,
         "team_id": routed_team_id,
         "team_name": routed_team_name,
     }
+    if field_role_for_user(user) == "Requester":
+        for internal in ("team_id", "team_name", "flagged", "requester_vip", "requester_active", "sla_id"):
+            detail[internal] = None
+    return detail
 
 
 @router.post("/tickets", response_model=TicketRead, status_code=status.HTTP_201_CREATED)
@@ -851,7 +862,7 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
 
 @router.post("/tickets/{ticket_id}/claim", response_model=TicketRead)
 async def claim_ticket(ticket_id: int, user: CurrentUser, db: DbSession) -> Ticket:
-    if not has_profile_right(user, "ticket:claim") or not has_profile_right(user, "ticket:view_queue"):
+    if not has_profile_right(user, "ticket:self_claim") or not has_profile_right(user, "ticket:view_queue"):
         raise HTTPException(status_code=403, detail="Ticket claim permission required")
     ticket = await get_scoped_ticket(ticket_id, user, db)
     if ticket is None:
