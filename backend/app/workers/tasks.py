@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.db import SessionLocal
 from app.core.config import get_settings
+from app.demo_data import DEMO_TITLES
 from app.models import AuditLog, NotificationTemplate, RecurringTicket, Ticket, User
 from app.services.content import sanitize_rich_text
 from app.services.tickets import calculate_priority, priority_label
@@ -43,14 +44,17 @@ def check_sla_breaches() -> dict[str, str]:
 
 async def _check_sla_breaches() -> None:
     breached_ticket_ids: list[int] = []
+    # In development the fixed demo tickets are exempt (exact titles only); production is unchanged.
+    exempt_titles = sorted(DEMO_TITLES) if get_settings().debug else []
     async with SessionLocal() as db:
         now = datetime.now(UTC)
-        result = await db.scalars(
-            select(Ticket).where(
-                Ticket.status.not_in(["PENDING", "SOLVED", "CLOSED"]),
-                ((Ticket.tto_due_at < now) | (Ticket.ttr_due_at < now)),
-            )
+        query = select(Ticket).where(
+            Ticket.status.not_in(["PENDING", "SOLVED", "CLOSED"]),
+            ((Ticket.tto_due_at < now) | (Ticket.ttr_due_at < now)),
         )
+        if exempt_titles:
+            query = query.where(Ticket.title.not_in(exempt_titles))
+        result = await db.scalars(query)
         for ticket in result:
             ticket.priority = max(ticket.priority, 4)
             notified = await db.scalar(
