@@ -1,6 +1,8 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useEffect, useMemo, useRef } from "react";
+import { Dispatch, SetStateAction, useEffect, useMemo, useRef } from "react";
+import AttachmentDropzone from "./AttachmentDropzone";
+import { AttachmentItem } from "../lib/attachments";
 
 type RequesterField = {
   key: string;
@@ -31,8 +33,10 @@ type RequesterTicketFormProps = {
   schema: RequesterFormSchema | null;
   values: Record<string, unknown>;
   onValuesChange: (values: Record<string, unknown>) => void;
-  files: File[];
-  onFilesChange: (files: File[]) => void;
+  items: AttachmentItem[];
+  setItems: Dispatch<SetStateAction<AttachmentItem[]>>;
+  headers: Record<string, string>;
+  createdTicketId: number | null;
 };
 
 function sanitizedEditorHTML(value: string): string {
@@ -122,9 +126,11 @@ export default function RequesterTicketForm({
   schema,
   values,
   onValuesChange,
-  files,
-  onFilesChange,
-}: RequesterTicketFormProps) {
+  items,
+  setItems,
+  headers,
+  createdTicketId,
+}:  RequesterTicketFormProps) {
   const fields = useMemo(
     () => Object.values(schema?.pages ?? {}).flat().filter((field) => field.editable),
     [schema],
@@ -141,45 +147,19 @@ export default function RequesterTicketForm({
     onValuesChange({ ...values, [key]: value });
   }
 
-  function addFiles(selected: FileList | File[]) {
-    const additions = Array.from(selected);
-    if (additions.length) onFilesChange([...files, ...additions]);
-  }
-
   function renderField(field: RequesterField) {
     const value = currentValues[field.key] ?? "";
     const widget = field.options.widget;
     if (widget === "attachments") {
       return (
-        <label className="file-picker" key={`${field.key}-${schema?.ticket_type_id}`}>
-          {field.label}
-          <span className="drop-zone" onDragOver={(event: DragEvent<HTMLSpanElement>) => event.preventDefault()} onDrop={(event: DragEvent<HTMLSpanElement>) => {
-            event.preventDefault();
-            addFiles(event.dataTransfer.files);
-          }}>
-            <input
-              type="file"
-              accept=".pdf,.png,.jpg,.jpeg,.txt,application/pdf,image/png,image/jpeg,text/plain"
-              multiple
-              onChange={(event: ChangeEvent<HTMLInputElement>) => {
-                addFiles(event.target.files ?? []);
-                event.target.value = "";
-              }}
-            />
-            <strong>Drop files here or choose files</strong>
-            <small>PDF, PNG, JPG, or TXT. Up to 10 MB per file.</small>
-          </span>
-          {files.length > 0 && (
-            <span className="file-list">
-              {files.map((file, index) => (
-                <span key={`${file.name}-${file.size}-${index}`}>
-                  {file.name}
-                  <b>{(file.size / 1024).toFixed(0)} KB</b>
-                </span>
-              ))}
-            </span>
-          )}
-        </label>
+        <AttachmentDropzone
+          key={`${field.key}-${schema?.ticket_type_id}`}
+          label={field.label}
+          items={items}
+          setItems={setItems}
+          headers={headers}
+          ticketId={createdTicketId}
+        />
       );
     }
 

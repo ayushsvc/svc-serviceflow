@@ -3,6 +3,9 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import AssignPicker from "./components/AssignPicker";
 import RequesterTicketForm from "./components/RequesterTicketForm";
+import AttachmentDropzone from "./components/AttachmentDropzone";
+import ReplyComposer from "./components/ReplyComposer";
+import { AttachmentItem, revokePreview, unsentCount, uploadItems } from "./lib/attachments";
 
 type TokenPair = { access_token: string; refresh_token: string };
 type TicketListColumn = "id" | "title" | "status" | "priority" | "opened_at" | "requester_name" | "requester_active" | "requester_vip" | "flagged" | "assignee_id" | "ttr_due_at";
@@ -150,7 +153,6 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [selected, setSelected] = useState<Ticket | null>(null);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
-  const [followup, setFollowup] = useState("");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("All tickets");
   const [priorityFilter, setPriorityFilter] = useState("All priorities");
@@ -183,8 +185,8 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   const [showCreate, setShowCreate] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDescription, setNewDescription] = useState("");
-  const [newFiles, setNewFiles] = useState<File[]>([]);
-  const [uploadMessage, setUploadMessage] = useState("");
+  const [attachmentItems, setAttachmentItems] = useState<AttachmentItem[]>([]);
+  const [createdTicket, setCreatedTicket] = useState<Ticket | null>(null);
   const [createError, setCreateError] = useState("");
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -338,15 +340,6 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     setError("");
     await loadTickets();
   }
-  async function addFollowup(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selected || !followup.trim()) return;
-    const response = await fetch(`/api/v1/tickets/${selected.id}/followups`, {
-      method: "POST", headers: { "Content-Type": "application/json", ...apiHeaders },
-      body: JSON.stringify({ body: followup, is_private: false }),
-    });
-    if (response.ok) { setFollowup(""); await selectTicket(selected); }
-  }
   useEffect(() => { void loadTickets(); }, [query, statusFilter, priorityFilter, listPage, listPageSize, listSort, listDirection, queueFilter, queueAccess]);
   useEffect(() => {
     void fetch("/api/v1/auth/me", { headers: apiHeaders }).then((response) => response.ok ? response.json() : null).then((user: CurrentUser | null) => setCurrentUser(user));
@@ -440,7 +433,14 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   async function createTicket(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setCreateError("");
-    setUploadMessage("");
+    if (createdTicket) {
+      await completeUploads(createdTicket);
+      return;
+    }
+    if (attachmentItems.some((item) => item.status === "error")) {
+      setCreateError("Remove the attachments that failed validation (for example files over 10 MB) before submitting.");
+      return;
+    }
     const title = requesterAccess ? String(customFields.summary ?? "") : newTitle;
     const description = requesterAccess ? String(customFields.details ?? "") : newDescription;
     const ticketFields = { ...customFields };
@@ -485,25 +485,37 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     }
     if (draftKey) window.localStorage.removeItem(draftKey);
     const ticket = (await response.json()) as Ticket;
-    let failedUploads = 0;
-    for (const file of newFiles) {
-      const formData = new FormData();
-      formData.append("document", file);
-      const uploadResponse = await fetch(`/api/v1/tickets/${ticket.id}/documents`, {
-        method: "POST", headers: apiHeaders, body: formData,
-      });
-      if (!uploadResponse.ok) failedUploads += 1;
+    await completeUploads(ticket);
+  }
+
+  async function completeUploads(ticket: Ticket) {
+    const ids = attachmentItems.filter((item) => item.status !== "done").map((item) => item.id);
+    const failed = await uploadItems(ticket.id, ids, attachmentItems, setAttachmentItems, apiHeaders);
+    if (failed) {
+      setCreatedTicket(ticket);
+      setCreateError(`Ticket #${ticket.id} was created, but ${failed} attachment${failed === 1 ? "" : "s"} could not be uploaded. Retry or remove them, then press Create ticket again.`);
+      await loadTickets();
+      return;
     }
     const defaultFields = requesterAccess && formSchema
       ? Object.fromEntries(Object.values(formSchema.pages).flat().filter((field) => field.default_value !== null).map((field) => [field.key, field.default_value]))
       : {};
-    setNewTitle(""); setNewDescription(""); setNewFiles([]); setRequesterSearch(""); setSelectedRequesterId(null); setImpact("3"); setUrgency("3"); setCategoryId(""); setAssigneeId(""); setCustomFields(defaultFields);
-    setUploadMessage(failedUploads ? `${failedUploads} attachment${failedUploads === 1 ? "" : "s"} could not be uploaded.` : "");
+    attachmentItems.forEach(revokePreview);
+    setCreatedTicket(null);
+    setNewTitle(""); setNewDescription(""); setAttachmentItems([]); setRequesterSearch(""); setSelectedRequesterId(null); setImpact("3"); setUrgency("3"); setCategoryId(""); setAssigneeId(""); setCustomFields(defaultFields);
     if (submitAnother) {
-      setNewTitle(""); setNewDescription(""); setCustomFields(defaultFields); setNewFiles([]); setSubmitAnother(false);
+      setNewTitle(""); setNewDescription(""); setCustomFields(defaultFields); setSubmitAnother(false);
     } else setShowCreate(false);
     await loadTickets();
     await selectTicket(ticket);
+  }
+
+  function closeCreate() {
+    if (unsentCount(attachmentItems) > 0 && !window.confirm("Some attachments have not been sent. Leave without sending them?")) return;
+    attachmentItems.forEach(revokePreview);
+    setAttachmentItems([]);
+    setCreatedTicket(null);
+    setShowCreate(false);
   }
 
   const filteredTickets = useMemo(() => tickets.filter((ticket) => {
@@ -630,9 +642,9 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         onAssigned={onTicketAssigned}
       /> : null;
     })()}
-    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{statusLabels[selected.status] ?? selected.status}</span>{queueAccess && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}{canAssignTickets && <button className="secondary-button" onClick={() => setAssignmentPickerTicketId(selected.id)}>Assign</button>}</div><div className="assignment-summary"><span>Priority: <strong>{selected.priority_label ?? `Priority ${selected.priority}`}{requesterAccess ? "" : ` (${selected.priority})`}</strong></span><span>Assignee: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span></div><div className="drawer-tabs"><button className="tab active">Activity</button><button className="tab">Details</button></div><div className="drawer-content"><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><form className="reply-box" onSubmit={addFollowup}><div className="reply-type"><span>Public reply</span><button type="button">⌄</button></div><textarea value={followup} onChange={(event) => setFollowup(event.target.value)} placeholder="Write a reply to the requester…" /><div className="reply-actions"><span>Visible to requester</span><button className="primary-button" type="submit">Send reply <Icon name="arrow" /></button></div></form><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>Employee</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div><div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div></dl></section></div></aside>}
+    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{statusLabels[selected.status] ?? selected.status}</span>{queueAccess && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}{canAssignTickets && <button className="secondary-button" onClick={() => setAssignmentPickerTicketId(selected.id)}>Assign</button>}</div><div className="assignment-summary"><span>Priority: <strong>{selected.priority_label ?? `Priority ${selected.priority}`}{requesterAccess ? "" : ` (${selected.priority})`}</strong></span><span>Assignee: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span></div><div className="drawer-tabs"><button className="tab active">Activity</button><button className="tab">Details</button></div><div className="drawer-content"><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><ReplyComposer ticketId={selected.id} headers={apiHeaders} onSent={() => selectTicket(selected)} /><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>Employee</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div><div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div></dl></section></div></aside>}
     {showCreate && (
-      <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowCreate(false); }}>
+      <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreate(); }}>
         <form
           className="create-modal"
           onSubmit={createTicket}
@@ -645,7 +657,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         >
           <div className="modal-header">
             <div><p className="kicker">NEW REQUEST</p><h2>Create a ticket</h2></div>
-            <button type="button" className="icon-button" onClick={() => setShowCreate(false)} aria-label="Close"><Icon name="close" /></button>
+            <button type="button" className="icon-button" onClick={closeCreate} aria-label="Close"><Icon name="close" /></button>
           </div>
           {requesterAccess ? (
             <RequesterTicketForm
@@ -655,8 +667,10 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
               schema={formSchema}
               values={customFields}
               onValuesChange={setCustomFields}
-              files={newFiles}
-              onFilesChange={setNewFiles}
+              items={attachmentItems}
+              setItems={setAttachmentItems}
+              headers={apiHeaders}
+              createdTicketId={createdTicket?.id ?? null}
             />
           ) : (
             <>
@@ -691,25 +705,10 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
               {formSchema
                 ? <DynamicFields schema={formSchema} values={customFields} onChange={(key, value) => setCustomFields((current) => ({ ...current, [key]: value }))} portal={false} />
                 : <p className="form-help">Loading the selected ticket form…</p>}
-              <label className="file-picker">
-                Attachments <span>Optional</span>
-                <span
-                  className="drop-zone"
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    setNewFiles((current) => [...current, ...Array.from(event.dataTransfer.files)]);
-                  }}
-                >
-                  <input type="file" accept=".pdf,.png,.jpg,.jpeg,.txt,application/pdf,image/png,image/jpeg,text/plain" multiple onChange={(event) => setNewFiles(Array.from(event.target.files ?? []))} />
-                  <strong>Drop files here or choose files</strong><small>PDF, PNG, JPG, or TXT. Up to 10 MB per file.</small>
-                </span>
-              </label>
-              {newFiles.length > 0 && <div className="file-list">{newFiles.map((file) => <span key={`${file.name}-${file.size}`}>{file.name}<b>{formatFileSize(file.size)}</b></span>)}</div>}
+              <AttachmentDropzone items={attachmentItems} setItems={setAttachmentItems} headers={apiHeaders} ticketId={createdTicket?.id ?? null} />
             </>
           )}
-          {createError && <p className="error">{createError}</p>}
-          {uploadMessage && <p className="error">{uploadMessage}</p>}
+          {createError && <p className="error" role="alert">{createError}</p>}
           {!requesterAccess && <aside className="new-ticket-sidebar" aria-label="Ticket preview">
             <p className="kicker">LIVE ROUTING</p>
             <div className={`priority-preview priority-${assignmentPreview?.priority ?? 3}`}>Priority {assignmentPreview?.priority ?? "—"}</div>
@@ -725,7 +724,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
           </aside>}
           <div className="modal-actions">
             <label className="checkbox"><input type="checkbox" checked={submitAnother} onChange={(event) => setSubmitAnother(event.target.checked)} /> Create another</label>
-            <button type="button" className="secondary-button" onClick={() => { if (!newTitle && !newDescription || window.confirm("Discard this ticket draft?")) setShowCreate(false); }}>Cancel</button>
+            <button type="button" className="secondary-button" onClick={() => { if (!newTitle && !newDescription || window.confirm("Discard this ticket draft?")) closeCreate(); }}>Cancel</button>
             <button type="button" className="secondary-button" onClick={saveDraft}>Save draft</button>
             <button type="submit" className="primary-button" disabled={!formSchema}>Submit ticket <Icon name="arrow" /></button>
           </div>
@@ -899,11 +898,6 @@ function formatDue(date: string) {
   if (hours < 0) return "Breached";
   if (hours < 24) return `${hours}h remaining`;
   return `${Math.round(hours / 24)}d remaining`;
-}
-
-function formatFileSize(bytes: number) {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function WorkflowPanel({ token }: { token: TokenPair }) {

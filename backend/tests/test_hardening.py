@@ -1,4 +1,4 @@
-from app.api.tickets import detect_document_type
+from app.services.attachments import detect_document_type
 
 
 def test_attachment_type_detection_uses_content_signatures() -> None:

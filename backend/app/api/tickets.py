@@ -2,15 +2,12 @@ import json
 import math
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
-from fastapi.responses import FileResponse
-from pathlib import Path
-from uuid import uuid4
+from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import String, and_, desc, false, func, or_, select, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.elements import ColumnElement
 from app.deps import CurrentUser, DbSession, require_admin, require_helpdesk
-from app.models import AuditLog, BusinessRule, Category, Entity, Group, GroupMember, ListProfile, PriorityMatrix, Profile, SLA, Ticket, TicketActor, TicketDocument, TicketFollowup, TicketLink, TicketSolution, TicketTask, TicketTypeDefinition, TicketWorkflow, User, WorkflowApproval
+from app.models import AuditLog, BusinessRule, Category, Entity, Group, GroupMember, ListProfile, PriorityMatrix, Profile, SLA, Ticket, TicketActor, TicketFollowup, TicketLink, TicketSolution, TicketTask, TicketTypeDefinition, TicketWorkflow, User, WorkflowApproval
 from app.schemas_tickets import ActorCreate, ActorRead, AssignableUserRead, CategoryCreate, CategoryRead, FollowupCreate, FollowupRead, GroupRead, LinkCreate, LinkRead, ListProfileCreate, ListProfileRead, ListProfileUpdate, RequesterRead, SolutionCreate, SolutionRead, TaskCreate, TaskRead, TicketAssignRequest, TicketAssignResult, TicketBulkResult, TicketBulkUpdate, TicketCreate, TicketListResponse, TicketRead, TicketUpdate
 from app.services.automation import calculate_sla_deadlines, conditions_match
 from app.services.tickets import calculate_priority, priority_label, priority_options, priority_urgency_impact, requester_priority_value, transition_status
@@ -21,8 +18,6 @@ from app.services.content import sanitize_rich_text, sanitize_ticket_description
 from app.services.bulk_tickets import apply_ticket_update, bulk_update_tickets as run_bulk_ticket_update, dispatch_ticket_update_effects
 
 router = APIRouter(tags=["tickets"])
-UPLOAD_ROOT = Path("/app/data/documents")
-ALLOWED_DOCUMENT_TYPES = {"application/pdf", "image/png", "image/jpeg", "text/plain"}
 PROFILE_FILTER_KEYS = {"search", "status", "priority", "sort", "direction", "page_size"}
 PROFILE_SORT_FIELDS = {"id", "opened_at", "priority", "status", "title"}
 PROFILE_COLUMNS = {"id", "title", "status", "priority", "opened_at", "requester_name", "requester_active", "requester_vip", "flagged", "assignee_id", "ttr_due_at"}
@@ -1096,66 +1091,6 @@ async def approve_solution(ticket_id: int, solution_id: int, user: CurrentUser, 
     await record_audit(db, entity="ticket_solution", entity_id=solution.id, action="approved", actor_id=user.id, diff={"ticket_id": ticket.id, "status": solution.status})
     await db.commit()
     return solution
-
-
-@router.post("/tickets/{ticket_id}/documents", status_code=status.HTTP_201_CREATED)
-async def upload_document(ticket_id: int, user: CurrentUser, db: DbSession, document: UploadFile = File(...)) -> dict[str, object]:
-    ticket = await scoped_ticket(ticket_id, user, db)
-    content = await document.read()
-    if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Document exceeds 10 MB limit")
-    filename = Path(document.filename or "document").name
-    if not document.filename or document.filename != filename or "\\" in document.filename or filename in {".", ".."}:
-        raise HTTPException(status_code=400, detail="Invalid document filename")
-    detected_type = detect_document_type(content)
-    if detected_type is None:
-        raise HTTPException(status_code=415, detail="Unsupported document type")
-    extension_types = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".txt": "text/plain"}
-    if extension_types.get(Path(filename).suffix.lower()) != detected_type:
-        raise HTTPException(status_code=415, detail="File extension does not match its content")
-    UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
-    stored_name = f"{uuid4().hex}-{filename}"
-    path = UPLOAD_ROOT / stored_name
-    path.write_bytes(content)
-    record = TicketDocument(ticket_id=ticket_id, filename=filename, path=str(path), uploaded_by=user.id)
-    db.add(record)
-    await db.commit()
-    await db.refresh(record)
-    await record_audit(db, entity="ticket_document", entity_id=record.id, action="uploaded", actor_id=user.id, diff={"ticket_id": ticket.id, "filename": record.filename})
-    await db.commit()
-    return {"id": record.id, "filename": record.filename, "created_at": record.created_at}
-
-
-def detect_document_type(content: bytes) -> str | None:
-    if content.startswith(b"%PDF-"):
-        return "application/pdf"
-    if content.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if content.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if b"\x00" not in content:
-        try:
-            content.decode("utf-8")
-            return "text/plain"
-        except UnicodeDecodeError:
-            return None
-    return None
-
-
-@router.get("/tickets/{ticket_id}/documents/{document_id}")
-async def download_document(ticket_id: int, document_id: int, user: CurrentUser, db: DbSession) -> FileResponse:
-    ticket = await scoped_ticket(ticket_id, user, db)
-    document = await db.scalar(select(TicketDocument).where(TicketDocument.id == document_id, TicketDocument.ticket_id == ticket.id))
-    if document is None:
-        raise HTTPException(status_code=404, detail="Document not found")
-    root = UPLOAD_ROOT.resolve()
-    path = Path(document.path).resolve()
-    if root not in path.parents or not path.is_file():
-        raise HTTPException(status_code=404, detail="Document not found")
-    response = FileResponse(path, filename=document.filename, media_type="application/octet-stream")
-    response.headers["Content-Disposition"] = f'attachment; filename="{document.filename}"'
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    return response
 
 
 @router.get("/tickets/{ticket_id}/links", response_model=list[LinkRead])

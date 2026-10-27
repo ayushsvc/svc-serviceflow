@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import audit, auth, automation, entities, field_engine, tickets, workflows
+from app.api import attachments, audit, auth, automation, entities, field_engine, tickets, workflows
 from app.core.config import get_settings
 
 
@@ -25,7 +25,7 @@ async def security_headers(request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
@@ -34,6 +34,7 @@ app.include_router(auth.router, prefix="/api/v1")
 app.include_router(entities.router, prefix="/api/v1")
 app.include_router(field_engine.router, prefix="/api/v1")
 app.include_router(tickets.router, prefix="/api/v1")
+app.include_router(attachments.router, prefix="/api/v1")
 app.include_router(automation.router, prefix="/api/v1")
 app.include_router(audit.router, prefix="/api/v1")
 app.include_router(workflows.router, prefix="/api/v1")
