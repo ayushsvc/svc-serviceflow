@@ -3,7 +3,6 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import AssignPicker from "./components/AssignPicker";
 import RequesterTicketForm from "./components/RequesterTicketForm";
-import TemplatePicker from "./components/TemplatePicker";
 
 type TokenPair = { access_token: string; refresh_token: string };
 type TicketListColumn = "id" | "title" | "status" | "priority" | "opened_at" | "requester_name" | "requester_active" | "requester_vip" | "flagged" | "assignee_id" | "ttr_due_at";
@@ -211,11 +210,8 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     || currentUser?.profile.rights?.["ticket:assign"]
     || currentUser?.profile.rights?.["*"],
   );
-  const canManageTemplates = Boolean(
-    currentUser?.profile.rights?.["templates:manage"]
-    || currentUser?.profile.rights?.["ticket:view_all"]
-    || currentUser?.profile.rights?.["*"],
-  );
+  // Administration visibility follows the '*' right; backend require_admin still checks the profile name (to be replaced by a named admin right in the roles/permissions step).
+  const canAccessAdministration = currentUser?.profile.rights?.["*"] === true;
   const requesterAccess = Boolean(currentUser?.profile.rights?.["ticket:own_only"]);
   const draftKey = currentUser ? `svc-ticket-draft:${currentUser.id}` : null;
 
@@ -441,28 +437,6 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     setDraftSaved(true);
     setCreateError("Draft saved on this device.");
   }
-  function applyTemplateValues(prefilled: Record<string, unknown>) {
-    setCustomFields((current) => ({
-      ...current,
-      ...prefilled,
-      ...(requesterAccess && current.priority != null ? { priority: current.priority } : {}),
-    }));
-    if (typeof prefilled.summary === "string") setNewTitle(prefilled.summary);
-    if (typeof prefilled.details === "string") setNewDescription(prefilled.details);
-    if (prefilled.category !== undefined && prefilled.category !== null) setCategoryId(String(prefilled.category));
-    if (typeof prefilled.urgency === "number" || typeof prefilled.urgency === "string") setUrgency(String(prefilled.urgency));
-    if (typeof prefilled.impact === "number" || typeof prefilled.impact === "string") setImpact(String(prefilled.impact));
-  }
-
-  function restoreTemplateValues(values: Record<string, unknown>) {
-    setCustomFields(values);
-    setNewTitle(typeof values.summary === "string" ? values.summary : "");
-    setNewDescription(typeof values.details === "string" ? values.details : "");
-    setCategoryId(values.category == null ? "" : String(values.category));
-    setUrgency(values.urgency == null ? "3" : String(values.urgency));
-    setImpact(values.impact == null ? "3" : String(values.impact));
-  }
-
   async function createTicket(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setCreateError("");
@@ -576,7 +550,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
           <div className="workspace-menu-heading"><span className="avatar avatar-indigo">SI</span><span><strong>Service desk</strong><small>{currentUser?.email ?? "Operations workspace"}</small></span><span className="menu-check">✓</span></div>
           <div className="workspace-menu-divider" />
           <button role="menuitem" onClick={() => { setActiveNav("Overview"); setWorkspaceMenuOpen(false); }}><Icon name="grid" /><span>Workspace overview</span></button>
-          {canManageTemplates && <button role="menuitem" onClick={() => { setActiveNav("Settings"); setWorkspaceMenuOpen(false); }}><Icon name="settings" /><span>Administration</span></button>}
+          {canAccessAdministration && <button role="menuitem" onClick={() => { setActiveNav("Settings"); setWorkspaceMenuOpen(false); }}><Icon name="settings" /><span>Administration</span></button>}
           <button role="menuitem" onClick={() => { setWorkspaceMenuOpen(false); onSignOut(); }}><span className="menu-signout">↗</span><span>Sign out</span></button>
         </div>}
       </div>
@@ -675,7 +649,6 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
           </div>
           {requesterAccess ? (
             <RequesterTicketForm
-              token={token.access_token}
               ticketTypes={ticketTypes}
               ticketType={ticketType}
               onTicketTypeChange={setTicketType}
@@ -684,10 +657,6 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
               onValuesChange={setCustomFields}
               files={newFiles}
               onFilesChange={setNewFiles}
-              canManageTemplates={canManageTemplates}
-              onApplyTemplate={applyTemplateValues}
-              onRestoreTemplate={restoreTemplateValues}
-              onOpenSettings={() => setActiveNav("Settings")}
             />
           ) : (
             <>
@@ -698,16 +667,6 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
                   {ticketTypes.map((type) => <option key={type.id} value={type.id}>{type.itil_class === "INCIDENT" ? "Report an issue · Incident" : type.itil_class === "REQUEST" ? "Request a service · Service Request" : type.name}</option>)}
                 </select>
               </label>
-              <TemplatePicker
-                token={token.access_token}
-                ticketTypeId={ticketType}
-                currentValues={{ ...customFields, summary: newTitle, details: newDescription, category: categoryId || undefined, urgency, impact }}
-                hasExistingInput={Boolean(newTitle.trim() || newDescription.trim() || Object.values(customFields).some((value) => value !== "" && value != null))}
-                canManageTemplates={canManageTemplates}
-                onApply={applyTemplateValues}
-                onRestore={restoreTemplateValues}
-                onOpenSettings={() => setActiveNav("Settings")}
-              />
               <label>
                 Requester
                 <input
@@ -821,17 +780,6 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
 
   type AdminField = { id: number; key: string; label: string; type: string; options: Record<string, unknown>; validation: Record<string, unknown>; is_system: boolean };
   type AdminTicketType = { id: number; name: string; itil_class: string; default_priority: number; default_sla_id?: number | null; color?: string | null; fields: Array<{ field_definition_id: number; order: number; page: string; required: boolean; visible_to_roles: string[]; editable_by_roles: string[]; default_value: unknown; show_on_portal: boolean; show_condition: Record<string, unknown> }> };
-  type AdminTemplate = {
-    id: number;
-    name: string;
-    description: string;
-    ticket_type_id: number;
-    team_id?: number | null;
-    prefilled: Record<string, unknown>;
-    is_active: boolean;
-    show_on_portal: boolean;
-    sort_order: number;
-  };
   type AdminCategory = { id: number; name: string; parent_id?: number | null; entity_id: number };
 
   function AdminPanel({ token }: { token: TokenPair }) {
@@ -839,8 +787,6 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
     const [section, setSection] = useState("Ticket types");
     const [fields, setFields] = useState<AdminField[]>([]);
     const [types, setTypes] = useState<AdminTicketType[]>([]);
-    const [templates, setTemplates] = useState<AdminTemplate[]>([]);
-    const [adminGroups, setAdminGroups] = useState<Group[]>([]);
     const [adminCategories, setAdminCategories] = useState<AdminCategory[]>([]);
     const [newCategory, setNewCategory] = useState({ name: "", parent_id: "" });
     const [selectedType, setSelectedType] = useState<AdminTicketType | null>(null);
@@ -850,26 +796,13 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
     const [dirty, setDirty] = useState(false);
     const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
     const [newField, setNewField] = useState({ key: "", label: "", type: "text" });
-    const [editingTemplateId, setEditingTemplateId] = useState<number | null>(null);
-    const [newTemplate, setNewTemplate] = useState({
-      name: "",
-      description: "",
-      ticket_type_id: "",
-      team_id: "",
-      prefilled: "{}",
-      is_active: true,
-      show_on_portal: false,
-      sort_order: 0,
-    });
 
     async function loadAdminData() {
-      const [fieldResponse, typeResponse, templateResponse, matrixResponse, categoryResponse, groupResponse] = await Promise.all([
+      const [fieldResponse, typeResponse, matrixResponse, categoryResponse] = await Promise.all([
         fetch("/api/v1/field-definitions", { headers }),
         fetch("/api/v1/ticket-types", { headers }),
-        fetch("/api/v1/templates", { headers }),
         fetch("/api/v1/priority-matrix", { headers }),
         fetch("/api/v1/categories", { headers }),
-        fetch("/api/v1/groups", { headers }),
       ]);
       if (fieldResponse.ok) setFields(await fieldResponse.json());
       if (typeResponse.ok) {
@@ -877,10 +810,8 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
         setTypes(loaded);
         if (!selectedType && loaded[0]) { setSelectedType(loaded[0]); setDraft(loaded[0]); }
       }
-      if (templateResponse.ok) setTemplates(await templateResponse.json());
       if (matrixResponse.ok) setMatrix((await matrixResponse.json()).matrix);
       if (categoryResponse.ok) setAdminCategories(await categoryResponse.json());
-      if (groupResponse.ok) setAdminGroups(await groupResponse.json());
     }
     useEffect(() => { void loadAdminData(); }, []);
 
@@ -934,80 +865,6 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
       const response = await fetch("/api/v1/priority-matrix", { method: "PUT", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ matrix }) });
       setNotice(response.ok ? "Priority matrix saved." : "Priority matrix must be a valid 5 × 5 matrix.");
     }
-    function editTemplate(template: AdminTemplate) {
-      setEditingTemplateId(template.id);
-      setNewTemplate({
-        name: template.name,
-        description: template.description ?? "",
-        ticket_type_id: String(template.ticket_type_id),
-        team_id: template.team_id == null ? "" : String(template.team_id),
-        prefilled: JSON.stringify(template.prefilled ?? {}, null, 2),
-        is_active: template.is_active,
-        show_on_portal: template.show_on_portal,
-        sort_order: template.sort_order,
-      });
-    }
-    function resetTemplateDraft() {
-      setEditingTemplateId(null);
-      setNewTemplate({
-        name: "",
-        description: "",
-        ticket_type_id: "",
-        team_id: "",
-        prefilled: "{}",
-        is_active: true,
-        show_on_portal: false,
-        sort_order: 0,
-      });
-    }
-    function templateFieldsForRole(role: "Administrator" | "Technician" | "Requester") {
-      let prefilledKeys: string[] = [];
-      try {
-        prefilledKeys = Object.keys(JSON.parse(newTemplate.prefilled) as Record<string, unknown>);
-      } catch {
-        return [];
-      }
-      const selected = types.find((type) => type.id === Number(newTemplate.ticket_type_id));
-      if (!selected) return [];
-      const allowedIds = new Set(selected.fields
-        .filter((mapping) =>
-          mapping.visible_to_roles.includes(role)
-          && mapping.editable_by_roles.includes(role)
-          && (role !== "Requester" || mapping.show_on_portal),
-        )
-        .map((mapping) => mapping.field_definition_id));
-      return fields
-        .filter((field) => prefilledKeys.includes(field.key) && allowedIds.has(field.id))
-        .map((field) => field.label);
-    }
-    async function saveTemplate(event: FormEvent<HTMLFormElement>) {
-      event.preventDefault();
-      try {
-        const response = await fetch(
-          editingTemplateId ? `/api/v1/ticket-templates/${editingTemplateId}` : "/api/v1/ticket-templates",
-          {
-            method: editingTemplateId ? "PATCH" : "POST",
-            headers: { ...headers, "Content-Type": "application/json" },
-            body: JSON.stringify({
-              name: newTemplate.name,
-              description: newTemplate.description,
-              ticket_type_id: Number(newTemplate.ticket_type_id),
-              team_id: newTemplate.team_id ? Number(newTemplate.team_id) : null,
-              prefilled: JSON.parse(newTemplate.prefilled),
-              is_active: newTemplate.is_active,
-              show_on_portal: newTemplate.show_on_portal,
-              sort_order: Number(newTemplate.sort_order),
-            }),
-          },
-        );
-        if (!response.ok) throw new Error();
-        resetTemplateDraft();
-        setNotice("Template saved.");
-        await loadAdminData();
-      } catch {
-        setNotice("Template could not be saved. Check the JSON, field values, and ticket type.");
-      }
-    }
     async function createCategory(event: FormEvent<HTMLFormElement>) {
       event.preventDefault();
       const response = await fetch("/api/v1/categories", { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ name: newCategory.name, parent_id: newCategory.parent_id ? Number(newCategory.parent_id) : null }) });
@@ -1017,56 +874,10 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
 
     return <section className="admin-panel">
       <div className="page-heading"><div><p className="kicker">ADMINISTRATION</p><h1>Service configuration</h1><p className="subheading">Design the forms and routing rules used by SVC ServiceFlow.</p></div></div>
-      <div className="admin-tabs">{["Ticket types", "Field catalogue", "Templates", "Priority matrix", "Categories"].map((item) => <button key={item} className={section === item ? "active" : ""} onClick={() => setSection(item)}>{item}</button>)}</div>
+      <div className="admin-tabs">{["Ticket types", "Field catalogue", "Priority matrix", "Categories"].map((item) => <button key={item} className={section === item ? "active" : ""} onClick={() => setSection(item)}>{item}</button>)}</div>
       {notice && <p className="settings-saved" role="status">{notice}</p>}
       {section === "Ticket types" && <div className="admin-layout"><section className="table-card admin-list"><div className="panel-card-heading"><h2>Ticket types</h2><button className="secondary-button" onClick={() => { const fresh = { id: 0, name: "New ticket type", itil_class: "REQUEST", default_priority: 3, fields: [] }; setSelectedType(fresh); setDraft(fresh); }}>New type</button></div>{types.map((type) => <button className={`admin-list-row ${selectedType?.id === type.id ? "selected" : ""}`} key={type.id} onClick={() => editType(type)}><span><strong>{type.name}</strong><small>{type.itil_class} · {type.fields.length} fields</small></span><b>›</b></button>)}</section>{draft && <section className="table-card admin-editor"><div className="panel-card-heading"><div><h2>Ticket type editor</h2><span>Drag order with the arrows, then preview the portal form.</span></div><button className="primary-button" onClick={() => void saveType()}>Save type</button></div><div className="form-grid"><label>Name<input value={draft.name} onChange={(event) => updateDraft({ name: event.target.value })} required /></label><label>ITIL class<select value={draft.itil_class} onChange={(event) => updateDraft({ itil_class: event.target.value })}><option value="INCIDENT">Incident</option><option value="REQUEST">Service Request</option><option value="PROBLEM">Problem</option><option value="CHANGE">Change</option></select></label><label>Default priority<input type="number" min="1" max="5" value={draft.default_priority} onChange={(event) => updateDraft({ default_priority: Number(event.target.value) })} /></label></div><h3 className="admin-subtitle">Field layout</h3>      <div className="field-layout">{draft.fields.map((field, index) => { const definition = fields.find((item) => item.id === field.field_definition_id); const replace = (changes: Partial<typeof field>) => updateDraft({ fields: draft.fields.map((item, itemIndex) => itemIndex === index ? { ...item, ...changes } : item) }); return <div className="field-layout-row" key={`${field.field_definition_id}-${index}`} draggable onDragStart={() => setDraggedIndex(index)} onDragOver={(event) => event.preventDefault()} onDrop={() => dropField(index)}><span className="drag-handle">⋮⋮</span><strong>{definition?.label ?? `Field ${field.field_definition_id}`}</strong><select value={field.page} onChange={(event) => replace({ page: event.target.value })}><option value="details">Details</option><option value="classification">Classification</option><option value="schedule">Schedule</option></select><label className="inline-check"><input type="checkbox" checked={field.required} onChange={(event) => replace({ required: event.target.checked })} /> Required</label><label className="inline-check"><input type="checkbox" checked={field.show_on_portal} onChange={(event) => replace({ show_on_portal: event.target.checked })} /> Visible</label><label className="inline-check"><input type="checkbox" checked={field.editable_by_roles.includes("Requester")} onChange={(event) => replace({ editable_by_roles: event.target.checked ? [...new Set([...field.editable_by_roles, "Requester"])] : field.editable_by_roles.filter((role) => role !== "Requester") })} /> Requester editable</label><input className="field-default-input" placeholder="Default value" value={field.default_value == null ? "" : String(field.default_value)} onChange={(event) => replace({ default_value: event.target.value || null })} /><input className="field-condition-input" placeholder="Condition JSON" value={Object.keys(field.show_condition ?? {}).length ? JSON.stringify(field.show_condition) : ""} onChange={(event) => { try { replace({ show_condition: event.target.value ? JSON.parse(event.target.value) : {} }); } catch { /* wait for valid JSON */ } }} /><button type="button" className="icon-button" onClick={() => moveField(index, -1)}>↑</button><button type="button" className="icon-button" onClick={() => moveField(index, 1)}>↓</button></div>; })}</div><div className="field-picker-row">{fields.filter((field) => !draft.fields.some((item) => item.field_definition_id === field.id)).map((field) => <button key={field.id} className="secondary-button" onClick={() => updateDraft({ fields: [...draft.fields, { field_definition_id: field.id, order: draft.fields.length, page: "details", required: false, visible_to_roles: ["Administrator", "Technician", "Requester"], editable_by_roles: ["Administrator", "Technician"], default_value: null, show_on_portal: false, show_condition: {} }] })}>+ {field.label}</button>)}</div><h3 className="admin-subtitle">Live portal preview</h3><div className="form-preview">{draft.fields.map((field) => { const definition = fields.find((item) => item.id === field.field_definition_id); return <label key={field.field_definition_id}>{definition?.label ?? "Field"}{field.required && <span> *</span>}<input placeholder={String(field.default_value ?? `Enter ${definition?.label?.toLowerCase() ?? "value"}`)} disabled /></label>; })}</div></section>}</div>}
       {section === "Field catalogue" && <div className="admin-two-column"><section className="table-card"><div className="panel-card-heading"><h2>Field catalogue</h2><span>{fields.length} definitions</span></div>{fields.map((field) => <div className="catalogue-row" key={field.id}><strong>{field.label}</strong><span>{field.key}</span><small>{field.type}{field.is_system ? " · System" : ""}</small></div>)}</section><form className="table-card admin-form-card" onSubmit={createField}><h2>Add custom field</h2><p>Create a field once and reuse it across ticket types.</p><label>Key<input value={newField.key} onChange={(event) => setNewField({ ...newField, key: event.target.value })} placeholder="business_unit" required /></label><label>Label<input value={newField.label} onChange={(event) => setNewField({ ...newField, label: event.target.value })} placeholder="Business unit" required /></label><label>Type<select value={newField.type} onChange={(event) => setNewField({ ...newField, type: event.target.value })}>{["text", "textarea", "number", "date", "datetime", "select", "multiselect", "checkbox", "url"].map((type) => <option key={type}>{type}</option>)}</select></label><button className="primary-button" type="submit">Add field</button></form></div>}
-      {section === "Templates" && (
-        <div className="admin-two-column template-admin-layout">
-          <section className="table-card template-admin-list">
-            <div className="panel-card-heading">
-              <div><h2>Templates</h2><span>{templates.length} saved in this entity</span></div>
-              <button type="button" className="secondary-button" onClick={resetTemplateDraft}>New template</button>
-            </div>
-            {templates.map((template) => (
-              <button
-                type="button"
-                className={`template-admin-row${editingTemplateId === template.id ? " selected" : ""}`}
-                key={template.id}
-                onClick={() => editTemplate(template)}
-              >
-                <strong>{template.name}</strong>
-                <span>{types.find((type) => type.id === template.ticket_type_id)?.name ?? "Ticket type"}</span>
-                <small>{template.is_active ? "Active" : "Inactive"} · {template.show_on_portal ? "Portal visible" : "Internal"} · {Object.keys(template.prefilled ?? {}).length} prefilled fields</small>
-                {template.description && <small>{template.description}</small>}
-              </button>
-            ))}
-            {!templates.length && <div className="empty-table"><strong>No templates yet</strong><span>Create a template to offer a reusable ticket starting point.</span></div>}
-          </section>
-          <form className="table-card admin-form-card" onSubmit={saveTemplate}>
-            <h2>{editingTemplateId ? "Edit template" : "New template"}</h2>
-            <label>Name<input value={newTemplate.name} onChange={(event) => setNewTemplate({ ...newTemplate, name: event.target.value })} required maxLength={160} /></label>
-            <label>Description<textarea value={newTemplate.description} onChange={(event) => setNewTemplate({ ...newTemplate, description: event.target.value })} rows={2} maxLength={500} placeholder="A short description shown in the picker" /></label>
-            <label>Ticket type<select value={newTemplate.ticket_type_id} onChange={(event) => setNewTemplate({ ...newTemplate, ticket_type_id: event.target.value })} required><option value="">Select type</option>{types.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}</select></label>
-            <label>Team<select value={newTemplate.team_id} onChange={(event) => setNewTemplate({ ...newTemplate, team_id: event.target.value })}><option value="">Global template</option>{adminGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
-            <label>Prefilled JSON<textarea value={newTemplate.prefilled} onChange={(event) => setNewTemplate({ ...newTemplate, prefilled: event.target.value })} rows={7} spellCheck={false} /></label>
-            <label className="settings-toggle"><span><strong>Active</strong><small>Available in the ticket template picker.</small></span><input type="checkbox" checked={newTemplate.is_active} onChange={(event) => setNewTemplate({ ...newTemplate, is_active: event.target.checked })} /></label>
-            <label className="settings-toggle"><span><strong>Show on portal</strong><small>Allow Requesters to use this template when its ticket type is portal-visible.</small></span><input type="checkbox" checked={newTemplate.show_on_portal} onChange={(event) => setNewTemplate({ ...newTemplate, show_on_portal: event.target.checked })} /></label>
-            <label>Sort order<input type="number" min="0" value={newTemplate.sort_order} onChange={(event) => setNewTemplate({ ...newTemplate, sort_order: Number(event.target.value) })} /></label>
-            <div className="template-role-preview">
-              <h3>Live prefill preview by role</h3>
-              {(["Administrator", "Technician", "Requester"] as const).map((role) => {
-                const visibleFields = templateFieldsForRole(role);
-                return <div key={role}><strong>{role}</strong><span>{visibleFields.length ? visibleFields.join(", ") : "No prefilled fields visible"}</span></div>;
-              })}
-            </div>
-            <div className="template-admin-actions">
-              <button className="primary-button" type="submit">{editingTemplateId ? "Save changes" : "Save template"}</button>
-              {editingTemplateId && <button type="button" className="secondary-button" onClick={resetTemplateDraft}>Cancel edit</button>}
-            </div>
-          </form>
-        </div>
-      )}
       {section === "Priority matrix" && <section className="table-card matrix-card"><div className="panel-card-heading"><div><h2>Priority matrix</h2><span>Rows are urgency, columns are impact.</span></div><button className="primary-button" onClick={() => void saveMatrix()}>Save matrix</button></div><div className="matrix-grid"><div /><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span>{matrix.map((row, rowIndex) => <><strong key={`label-${rowIndex}`}>{rowIndex + 1}</strong>{row.map((value, columnIndex) => <input key={`${rowIndex}-${columnIndex}`} type="number" min="1" max="5" value={value} onChange={(event) => setMatrix(matrix.map((currentRow, currentRowIndex) => currentRowIndex === rowIndex ? currentRow.map((current, currentColumn) => currentColumn === columnIndex ? Number(event.target.value) : current) : currentRow))} />)}</>)}</div></section>}
       {section === "Categories" && <div className="admin-two-column"><section className="table-card"><div className="panel-card-heading"><h2>Category tree</h2><span>{adminCategories.length} categories · up to four levels</span></div>{adminCategories.length ? adminCategories.map((category) => { let level = 0; let parent = category.parent_id; while (parent && level < 4) { level += 1; parent = adminCategories.find((item) => item.id === parent)?.parent_id; } return <div className="catalogue-row category-tree-row" key={category.id} style={{ paddingLeft: `${level * 20}px` }}><strong>{level ? "↳ " : ""}{category.name}</strong><span>{level === 0 ? "Root" : `Level ${level + 1}`}</span><small>Entity scoped</small></div>; }) : <div className="empty-table"><strong>No categories configured</strong><span>Add the first category to start the service catalogue tree.</span></div>}</section><form className="table-card admin-form-card" onSubmit={createCategory}><h2>Add category</h2><p>Categories are restricted to the signed-in entity and may be nested four levels deep.</p><label>Name<input value={newCategory.name} onChange={(event) => setNewCategory({ ...newCategory, name: event.target.value })} required minLength={2} /></label><label>Parent<select value={newCategory.parent_id} onChange={(event) => setNewCategory({ ...newCategory, parent_id: event.target.value })}><option value="">Root category</option>{adminCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><button className="primary-button" type="submit">Add category</button></form></div>}
     </section>;

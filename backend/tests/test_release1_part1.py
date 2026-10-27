@@ -9,7 +9,7 @@ from sqlalchemy.pool import NullPool
 from app.core.config import get_settings
 from app.deps import current_user, get_db
 from app.main import app
-from app.models import AuditLog, Entity, PriorityMatrix, Profile, SLA, Ticket, TicketTemplate, TicketTypeDefinition, User
+from app.models import AuditLog, Entity, PriorityMatrix, Profile, SLA, Ticket, TicketTypeDefinition, User
 from app.seed import seed_entity_defaults, seed_ticket_type_field_defaults
 from app.workers.tasks import _notification_ticket
 
@@ -277,38 +277,20 @@ async def test_staff_urgency_impact_use_entity_matrix_and_bulk_priority_is_direc
 
 
 @pytest.mark.asyncio
-async def test_requester_template_prefill_filters_staff_fields_and_priority_labels_are_role_aware(real_postgres_http) -> None:
+async def test_priority_labels_are_role_aware_for_requester_and_staff(real_postgres_http) -> None:
     db = real_postgres_http["db"]
-    entity = real_postgres_http["entities"]["A"]
     incident = await _ticket_type(db, "INCIDENT")
-    template = TicketTemplate(
-        entity_id=entity.id,
-        ticket_type_id=incident.id,
-        name=f"Template {uuid4().hex}",
-        description="Priority and staff fields prefill",
-        show_on_portal=True,
-        prefilled={"summary": "Prefilled title", "details": "<p>Prefilled details here</p>", "urgency": 1, "impact": 2, "priority": 1},
-    )
-    db.add(template)
-    await db.flush()
     requester = real_postgres_http["users"]["A_requester"]
     real_postgres_http["state"]["user"] = requester
-
-    detail = await real_postgres_http["client"].get(f"/api/v1/ticket-templates/{template.id}")
-    assert detail.status_code == 200, detail.text
-    assert "urgency" not in detail.json()["prefilled"]
-    assert "impact" not in detail.json()["prefilled"]
-    assert detail.json()["prefilled"]["priority"] == 1
 
     ticket_response = await real_postgres_http["client"].post(
         "/api/v1/tickets",
         json={
-            "title": "Requester choice overrides template",
+            "title": "Requester low priority label",
             "description": "A valid description with enough detail.",
             "type": "INCIDENT",
             "ticket_type_id": incident.id,
             "priority": "low",
-            "custom_fields": detail.json()["prefilled"],
         },
     )
     assert ticket_response.status_code == 201, ticket_response.text

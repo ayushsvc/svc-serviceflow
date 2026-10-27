@@ -48,46 +48,6 @@ class TicketTypeRead(TicketTypeCreate):
     entity_id: int | None
 
 
-class TemplateCreate(BaseModel):
-    name: str = Field(min_length=2, max_length=160)
-    description: str = Field(default="", max_length=500)
-    ticket_type_id: int = Field(gt=0)
-    team_id: int | None = Field(default=None, gt=0)
-    prefilled: dict[str, Any] = Field(default_factory=dict)
-    is_active: bool = True
-    show_on_portal: bool = False
-    sort_order: int = Field(default=0, ge=0)
-
-
-class TemplateRead(TemplateCreate):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    entity_id: int | None = None
-
-
-class TemplateTeamRead(BaseModel):
-    id: int
-    name: str
-
-
-class TemplateListItem(BaseModel):
-    id: int
-    name: str
-    description: str
-    ticket_type_id: int
-    team: TemplateTeamRead | None
-    is_recent: bool
-
-
-class TemplateDetailRead(BaseModel):
-    id: int
-    name: str
-    description: str
-    ticket_type_id: int
-    team: TemplateTeamRead | None
-    prefilled: dict[str, Any]
-
-
 class FormField(BaseModel):
     key: str
     label: str

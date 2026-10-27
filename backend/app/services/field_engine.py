@@ -132,30 +132,6 @@ async def sanitize_field_values(
     return sanitized
 
 
-async def validate_template_prefilled(
-    db: AsyncSession,
-    ticket_type_id: int,
-    entity_id: int,
-    values: dict[str, Any],
-) -> dict[str, Any]:
-    _, fields = await get_type_fields(db, ticket_type_id, entity_id)
-    definitions = {definition.key: definition for definition, _ in fields}
-    unknown = set(values) - set(definitions)
-    if unknown:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Unknown ticket fields: {', '.join(sorted(unknown))}",
-        )
-    sanitized = await sanitize_field_values(db, ticket_type_id, entity_id, values)
-    for key, value in sanitized.items():
-        if not _valid_value(definitions[key], value):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Invalid value for ticket field '{key}'",
-            )
-    return sanitized
-
-
 async def validate_custom_fields(
     db: AsyncSession,
     ticket_type_id: int,

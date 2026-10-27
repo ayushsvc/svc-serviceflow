@@ -1,7 +1,6 @@
 "use client";
 
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef } from "react";
-import TemplatePicker from "./TemplatePicker";
 
 type RequesterField = {
   key: string;
@@ -26,7 +25,6 @@ type RequesterTicketType = {
 };
 
 type RequesterTicketFormProps = {
-  token: string;
   ticketTypes: RequesterTicketType[];
   ticketType: string;
   onTicketTypeChange: (ticketType: string) => void;
@@ -35,10 +33,6 @@ type RequesterTicketFormProps = {
   onValuesChange: (values: Record<string, unknown>) => void;
   files: File[];
   onFilesChange: (files: File[]) => void;
-  canManageTemplates: boolean;
-  onApplyTemplate: (values: Record<string, unknown>) => void;
-  onRestoreTemplate: (values: Record<string, unknown>) => void;
-  onOpenSettings: () => void;
 };
 
 function sanitizedEditorHTML(value: string): string {
@@ -122,7 +116,6 @@ function RichTextEditor({
 }
 
 export default function RequesterTicketForm({
-  token,
   ticketTypes,
   ticketType,
   onTicketTypeChange,
@@ -131,10 +124,6 @@ export default function RequesterTicketForm({
   onValuesChange,
   files,
   onFilesChange,
-  canManageTemplates,
-  onApplyTemplate,
-  onRestoreTemplate,
-  onOpenSettings,
 }: RequesterTicketFormProps) {
   const fields = useMemo(
     () => Object.values(schema?.pages ?? {}).flat().filter((field) => field.editable),
@@ -252,8 +241,6 @@ export default function RequesterTicketForm({
     );
   }
 
-  const selectedType = ticketTypes.find((type) => String(type.id) === ticketType);
-
   return (
     <>
       <label>
@@ -270,26 +257,6 @@ export default function RequesterTicketForm({
           Choose Incident for an interruption or fault. Choose Service Request for access, hardware, software, or another service.
         </small>
       </label>
-      {selectedType && (
-        <TemplatePicker
-          token={token}
-          ticketTypeId={ticketType}
-          currentValues={currentValues}
-          hasExistingInput={Object.values(currentValues).some((value) => value !== "" && value != null)}
-          canManageTemplates={canManageTemplates}
-          onApply={(prefilled) => {
-            const chosenPriority = priorityField
-              ? currentValues[priorityField.key]
-              : undefined;
-            onApplyTemplate({
-              ...prefilled,
-              ...(chosenPriority == null ? {} : { [priorityField?.key ?? ""]: chosenPriority }),
-            });
-          }}
-          onRestore={onRestoreTemplate}
-          onOpenSettings={onOpenSettings}
-        />
-      )}
       {schema
         ? <div className="requester-ticket-fields">{fields.map(renderField)}</div>
         : <p className="form-help">Loading the selected ticket form…</p>}

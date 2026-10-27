@@ -291,7 +291,7 @@ async def test_technician_ticket_queue_is_limited_to_assignee_and_member_teams(r
 
 
 @pytest.mark.asyncio
-async def test_rich_text_is_sanitized_for_ticket_subresources_and_templates(real_postgres_http) -> None:
+async def test_rich_text_is_sanitized_for_ticket_subresources_and_notification_templates(real_postgres_http) -> None:
     client = real_postgres_http["client"]
     state = real_postgres_http["state"]
     db = real_postgres_http["db"]
@@ -334,26 +334,6 @@ async def test_rich_text_is_sanitized_for_ticket_subresources_and_templates(real
         assert resource.json()[body_key] == "<p>Safe</p>"
         assert "<script" not in resource.text and "onload" not in resource.text
 
-    state["user"] = admin
-    template = await client.post(
-        "/api/v1/templates",
-        json={
-            "name": f"Sanitized template {uuid4().hex}",
-            "ticket_type_id": incident.id,
-            "prefilled": {"details": attack, "source": "EMAIL", "agent": technician.id},
-            "show_on_portal": True,
-        },
-    )
-    assert template.status_code == 201, template.text
-    assert template.json()["prefilled"]["details"] == "<p>Safe</p>"
-    state["user"] = requester
-    requester_templates = await client.get("/api/v1/templates")
-    assert requester_templates.status_code == 200, requester_templates.text
-    requester_template = next(
-        item for item in requester_templates.json() if item["id"] == template.json()["id"]
-    )
-    assert requester_template["prefilled"] == {"details": "<p>Safe</p>"}
-    assert requester_template["team_id"] is None
     state["user"] = admin
 
     notification = await client.post(
