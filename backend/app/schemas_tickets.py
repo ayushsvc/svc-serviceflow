@@ -115,15 +115,18 @@ class TicketBulkResult(BaseModel):
 
 
 class FollowupCreate(BaseModel):
-    body: str = Field(min_length=1, max_length=30000)
+    body: str = Field(default="", max_length=30000)
     is_private: bool = False
+    expects_attachments: bool = False
 
 
-class FollowupRead(FollowupCreate):
+class FollowupRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     ticket_id: int
     author_id: int
+    body: str
+    is_private: bool
     created_at: datetime
 
 

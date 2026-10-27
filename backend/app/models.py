@@ -322,6 +322,8 @@ class TicketDocument(Base):
     size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     removed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    followup_id: Mapped[int | None] = mapped_column(ForeignKey("ticket_followups.id", ondelete="CASCADE"), nullable=True, index=True)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("ticket_tasks.id", ondelete="CASCADE"), nullable=True, index=True)
 
 
 class TicketLink(Base):

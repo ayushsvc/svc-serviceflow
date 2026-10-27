@@ -5,8 +5,14 @@ import re
 import zipfile
 import zlib
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
+
+from fastapi import HTTPException
+from sqlalchemy import and_, exists, func, or_, select, true
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Ticket, TicketDocument, TicketFollowup, TicketTask, User
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_FILES_PER_TICKET = 5
@@ -19,6 +25,7 @@ MAX_FILENAME_LENGTH = 200
 
 FILE_TOO_LARGE_MESSAGE = "File exceeds the 10 MB limit."
 TOO_MANY_FILES_MESSAGE = "A ticket can have at most 5 attachments. Remove one before adding another."
+GENERIC_LIMIT_MESSAGE = "Attachment limit reached"
 
 
 @dataclass(frozen=True)
@@ -244,3 +251,114 @@ def content_disposition(filename: str, *, inline: bool = False) -> str:
     fallback = re.sub(r"[^A-Za-z0-9._ -]", "_", filename) or "download"
     disposition = "inline" if inline else "attachment"
     return f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+def can_see_private_items(user: User) -> bool:
+    # Same rule as require_helpdesk: private notes, private followups and tasks are staff-only.
+    return user.profile.interface == "helpdesk"
+
+
+def visible_document_filter(user: User):
+    """The one SQL condition deciding which documents a user may see."""
+    if can_see_private_items(user):
+        return true()
+    private_followups = select(TicketFollowup.id).where(TicketFollowup.is_private.is_(True))
+    return and_(
+        TicketDocument.task_id.is_(None),
+        or_(TicketDocument.followup_id.is_(None), TicketDocument.followup_id.not_in(private_followups)),
+    )
+
+
+def live_followup_filter():
+    """A followup is shown only if it has text or at least one live attachment."""
+    return or_(
+        TicketFollowup.body != "",
+        exists(
+            select(TicketDocument.id).where(
+                TicketDocument.followup_id == TicketFollowup.id,
+                TicketDocument.removed_at.is_(None),
+            )
+        ),
+    )
+
+
+async def get_visible_document(db: AsyncSession, ticket: Ticket, user: User, document_id: int) -> TicketDocument:
+    document = await db.scalar(
+        select(TicketDocument).where(
+            TicketDocument.id == document_id,
+            TicketDocument.ticket_id == ticket.id,
+            TicketDocument.removed_at.is_(None),
+            visible_document_filter(user),
+        )
+    )
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return document
+
+
+async def list_visible_documents(db: AsyncSession, ticket: Ticket, user: User):
+    return (
+        await db.execute(
+            select(TicketDocument, User.name)
+            .outerjoin(User, User.id == TicketDocument.uploaded_by)
+            .where(
+                TicketDocument.ticket_id == ticket.id,
+                TicketDocument.removed_at.is_(None),
+                visible_document_filter(user),
+            )
+            .order_by(TicketDocument.created_at, TicketDocument.id)
+        )
+    ).all()
+
+
+async def resolve_attachment_source(
+    db: AsyncSession, ticket: Ticket, user: User, followup_id: int | None, task_id: int | None
+) -> tuple[TicketFollowup | None, TicketTask | None]:
+    """Validate the followup or task an upload is attached to; any mismatch is a plain 404."""
+    if followup_id is not None and task_id is not None:
+        raise HTTPException(status_code=422, detail="Attach to a followup or a task, not both")
+    not_found = HTTPException(status_code=404, detail="Not found")
+    staff = can_see_private_items(user)
+    if followup_id is not None:
+        followup = await db.scalar(
+            select(TicketFollowup).where(TicketFollowup.id == followup_id, TicketFollowup.ticket_id == ticket.id)
+        )
+        if followup is None or (not staff and (followup.is_private or followup.author_id != user.id)):
+            raise not_found
+        return followup, None
+    if task_id is not None:
+        task = await db.scalar(select(TicketTask).where(TicketTask.id == task_id, TicketTask.ticket_id == ticket.id))
+        if task is None or not staff:
+            raise not_found
+        return None, task
+    return None, None
+
+
+async def live_document_count(db: AsyncSession, ticket_id: int, *, followup_id: int | None = None) -> int:
+    query = select(func.count(TicketDocument.id)).where(
+        TicketDocument.ticket_id == ticket_id, TicketDocument.removed_at.is_(None)
+    )
+    if followup_id is not None:
+        query = query.where(TicketDocument.followup_id == followup_id)
+    return (await db.scalar(query)) or 0
+
+
+def limit_message(user: User) -> str:
+    return TOO_MANY_FILES_MESSAGE if can_see_private_items(user) else GENERIC_LIMIT_MESSAGE
+
+
+def infer_content_type(path: Path, filename: str) -> str | None:
+    """Content type for legacy rows that were stored without one."""
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(16)
+    except OSError:
+        head = b""
+    detected = detect_document_type(head) if head else None
+    if detected:
+        return detected
+    suffix = PurePosixPath(filename).suffix.lower()
+    for kind in ATTACHMENT_KINDS.values():
+        if suffix in kind.extensions:
+            return kind.content_type
+    return None

@@ -74,12 +74,16 @@ class _PlainText(HTMLParser):
         self.parts.append(data)
 
 
+def rich_text_to_plain(value: str) -> str:
+    parser = _PlainText()
+    parser.feed(value)
+    parser.close()
+    return " ".join("".join(parser.parts).split())
+
+
 def sanitize_ticket_description(value: str) -> str:
     sanitized = sanitize_rich_text(value)
-    parser = _PlainText()
-    parser.feed(sanitized)
-    parser.close()
-    plain_text = " ".join("".join(parser.parts).split())
+    plain_text = rich_text_to_plain(sanitized)
     if len(plain_text) < MIN_DESCRIPTION_TEXT_LENGTH:
         raise ValueError(
             f"Description must contain at least {MIN_DESCRIPTION_TEXT_LENGTH} characters of text."

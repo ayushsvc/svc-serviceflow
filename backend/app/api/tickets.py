@@ -7,14 +7,15 @@ from sqlalchemy import String, and_, desc, false, func, or_, select, true, updat
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.elements import ColumnElement
 from app.deps import CurrentUser, DbSession, require_admin, require_helpdesk
-from app.models import AuditLog, BusinessRule, Category, Entity, Group, GroupMember, ListProfile, PriorityMatrix, Profile, SLA, Ticket, TicketActor, TicketFollowup, TicketLink, TicketSolution, TicketTask, TicketTypeDefinition, TicketWorkflow, User, WorkflowApproval
+from app.models import AuditLog, BusinessRule, Category, Entity, Group, GroupMember, ListProfile, PriorityMatrix, Profile, SLA, Ticket, TicketActor, TicketDocument, TicketFollowup, TicketLink, TicketSolution, TicketTask, TicketTypeDefinition, TicketWorkflow, User, WorkflowApproval
 from app.schemas_tickets import ActorCreate, ActorRead, AssignableUserRead, CategoryCreate, CategoryRead, FollowupCreate, FollowupRead, GroupRead, LinkCreate, LinkRead, ListProfileCreate, ListProfileRead, ListProfileUpdate, RequesterRead, SolutionCreate, SolutionRead, TaskCreate, TaskRead, TicketAssignRequest, TicketAssignResult, TicketBulkResult, TicketBulkUpdate, TicketCreate, TicketListResponse, TicketRead, TicketUpdate
 from app.services.automation import calculate_sla_deadlines, conditions_match
 from app.services.tickets import calculate_priority, priority_label, priority_options, priority_urgency_impact, requester_priority_value, transition_status
 from app.workers.tasks import send_ticket_notification
 from app.services.audit import record_audit
 from app.services.field_engine import REQUESTER_FORM_FIELDS, field_role_for_user, store_field_values, validate_custom_fields
-from app.services.content import sanitize_rich_text, sanitize_ticket_description
+from app.services.content import rich_text_to_plain, sanitize_rich_text, sanitize_ticket_description
+from app.services.attachments import can_see_private_items, live_followup_filter, visible_document_filter
 from app.services.bulk_tickets import apply_ticket_update, bulk_update_tickets as run_bulk_ticket_update, dispatch_ticket_update_effects
 
 router = APIRouter(tags=["tickets"])
@@ -996,8 +997,8 @@ async def followups(ticket_id: int, user: CurrentUser, db: DbSession) -> list[Ti
     ticket = await get_scoped_ticket(ticket_id, user, db)
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    query = select(TicketFollowup).where(TicketFollowup.ticket_id == ticket_id)
-    if user.profile.interface == "self_service":
+    query = select(TicketFollowup).where(TicketFollowup.ticket_id == ticket_id, live_followup_filter())
+    if not can_see_private_items(user):
         query = query.where(TicketFollowup.is_private.is_(False))
     return list((await db.scalars(query.order_by(TicketFollowup.created_at))).all())
 
@@ -1009,15 +1010,19 @@ async def add_followup(ticket_id: int, payload: FollowupCreate, user: CurrentUse
         raise HTTPException(status_code=404, detail="Ticket not found")
     if payload.is_private:
         require_helpdesk(user)
-    values = payload.model_dump()
-    values["body"] = sanitize_rich_text(values["body"])
-    followup = TicketFollowup(ticket_id=ticket_id, author_id=user.id, **values)
+    body = sanitize_rich_text(payload.body)
+    if not rich_text_to_plain(body):
+        if not payload.expects_attachments:
+            raise HTTPException(status_code=422, detail="A reply needs text or at least one attachment")
+        body = ""
+    followup = TicketFollowup(ticket_id=ticket_id, author_id=user.id, body=body, is_private=payload.is_private)
     db.add(followup)
     await db.commit()
     await db.refresh(followup)
     await record_audit(db, entity="ticket_followup", entity_id=followup.id, action="created", actor_id=user.id, diff={"ticket_id": ticket.id, "is_private": followup.is_private})
     await db.commit()
-    if not followup.is_private:
+    # An attachment-only reply notifies after its first attachment is stored (see api/attachments.py).
+    if not followup.is_private and followup.body:
         send_ticket_notification.delay(ticket.id, "public_reply")
     return followup
 
@@ -1031,6 +1036,7 @@ async def scoped_ticket(ticket_id: int, user: CurrentUser, db: DbSession) -> Tic
 
 @router.get("/tickets/{ticket_id}/tasks", response_model=list[TaskRead])
 async def list_tasks(ticket_id: int, user: CurrentUser, db: DbSession) -> list[TicketTask]:
+    require_helpdesk(user)
     await scoped_ticket(ticket_id, user, db)
     return list((await db.scalars(select(TicketTask).where(TicketTask.ticket_id == ticket_id).order_by(TicketTask.created_at))).all())
 
@@ -1123,12 +1129,23 @@ async def link_ticket(ticket_id: int, payload: LinkCreate, user: CurrentUser, db
 @router.get("/tickets/{ticket_id}/timeline")
 async def timeline(ticket_id: int, user: CurrentUser, db: DbSession) -> list[dict[str, object]]:
     await scoped_ticket(ticket_id, user, db)
-    followups = await db.scalars(select(TicketFollowup).where(TicketFollowup.ticket_id == ticket_id).order_by(TicketFollowup.created_at))
-    tasks = await db.scalars(select(TicketTask).where(TicketTask.ticket_id == ticket_id).order_by(TicketTask.created_at))
+    staff = can_see_private_items(user)
+    followups = await db.scalars(select(TicketFollowup).where(TicketFollowup.ticket_id == ticket_id, live_followup_filter()).order_by(TicketFollowup.created_at))
+    tasks = await db.scalars(select(TicketTask).where(TicketTask.ticket_id == ticket_id).order_by(TicketTask.created_at)) if staff else []
     solutions = await db.scalars(select(TicketSolution).where(TicketSolution.ticket_id == ticket_id).order_by(TicketSolution.created_at))
+    attached = dict((await db.execute(
+        select(TicketDocument.followup_id, func.count(TicketDocument.id))
+        .where(TicketDocument.ticket_id == ticket_id, TicketDocument.removed_at.is_(None), TicketDocument.followup_id.is_not(None), visible_document_filter(user))
+        .group_by(TicketDocument.followup_id)
+    )).all())
+    followup_items = [item for item in followups if not item.is_private or staff]
     events = [
-        {"kind": "followup", "id": item.id, "body": item.body, "author_id": item.author_id, "private": item.is_private, "created_at": item.created_at}
-        for item in followups if not item.is_private or user.profile.interface == "helpdesk"
+        {
+            "kind": "followup", "id": item.id,
+            "body": item.body or f"Attached {attached.get(item.id, 0)} file{'' if attached.get(item.id, 0) == 1 else 's'}",
+            "author_id": item.author_id, "private": item.is_private, "created_at": item.created_at,
+        }
+        for item in followup_items if item.body or attached.get(item.id, 0)
     ]
     events += [{"kind": "task", "id": item.id, "body": item.body, "state": item.state, "created_at": item.created_at} for item in tasks]
     events += [{"kind": "solution", "id": item.id, "body": item.body, "state": item.status, "author_id": item.author_id, "created_at": item.created_at} for item in solutions]

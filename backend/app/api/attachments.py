@@ -2,9 +2,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.api.tickets import can_update_tickets, scoped_ticket
 from app.deps import CurrentUser, DbSession
@@ -13,13 +13,19 @@ from app.services.attachments import (
     MAX_FILE_BYTES,
     MAX_FILES_PER_TICKET,
     PREVIEW_CONTENT_TYPES,
-    TOO_MANY_FILES_MESSAGE,
     AttachmentError,
     content_disposition,
     detect_document_type,
+    get_visible_document,
+    infer_content_type,
+    limit_message,
+    list_visible_documents,
+    live_document_count,
+    resolve_attachment_source,
     validate_attachment,
 )
 from app.services.audit import record_audit
+from app.workers.tasks import send_ticket_notification
 
 router = APIRouter(tags=["attachments"])
 UPLOAD_ROOT = Path("/app/data/documents")
@@ -45,31 +51,25 @@ def stored_size(document: TicketDocument) -> int | None:
         return None
 
 
+def effective_content_type(document: TicketDocument) -> str | None:
+    return document.content_type or infer_content_type(Path(document.path), document.filename)
+
+
 def document_view(document: TicketDocument, uploader_name: str | None, user: User, ticket: Ticket) -> dict[str, object]:
+    content_type = effective_content_type(document)
     return {
         "id": document.id,
         "filename": document.filename,
-        "content_type": document.content_type,
+        "content_type": content_type,
         "size_bytes": stored_size(document),
         "uploaded_by": document.uploaded_by,
         "uploaded_by_name": uploader_name,
         "created_at": document.created_at,
-        "previewable": document.content_type in PREVIEW_CONTENT_TYPES,
+        "followup_id": document.followup_id,
+        "task_id": document.task_id,
+        "previewable": content_type in PREVIEW_CONTENT_TYPES,
         "can_remove": can_remove_document(user, ticket, document),
     }
-
-
-async def get_active_document(db: DbSession, ticket: Ticket, document_id: int) -> TicketDocument:
-    document = await db.scalar(
-        select(TicketDocument).where(
-            TicketDocument.id == document_id,
-            TicketDocument.ticket_id == ticket.id,
-            TicketDocument.removed_at.is_(None),
-        )
-    )
-    if document is None:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return document
 
 
 def stored_file(document: TicketDocument) -> Path:
@@ -83,20 +83,21 @@ def stored_file(document: TicketDocument) -> Path:
 @router.get("/tickets/{ticket_id}/documents")
 async def list_documents(ticket_id: int, user: CurrentUser, db: DbSession) -> list[dict[str, object]]:
     ticket = await scoped_ticket(ticket_id, user, db)
-    rows = (
-        await db.execute(
-            select(TicketDocument, User.name)
-            .outerjoin(User, User.id == TicketDocument.uploaded_by)
-            .where(TicketDocument.ticket_id == ticket.id, TicketDocument.removed_at.is_(None))
-            .order_by(TicketDocument.created_at, TicketDocument.id)
-        )
-    ).all()
+    rows = await list_visible_documents(db, ticket, user)
     return [document_view(document, name, user, ticket) for document, name in rows]
 
 
 @router.post("/tickets/{ticket_id}/documents", status_code=status.HTTP_201_CREATED)
-async def upload_document(ticket_id: int, user: CurrentUser, db: DbSession, document: UploadFile = File(...)) -> dict[str, object]:
+async def upload_document(
+    ticket_id: int,
+    user: CurrentUser,
+    db: DbSession,
+    document: UploadFile = File(...),
+    followup_id: int | None = Form(default=None),
+    task_id: int | None = Form(default=None),
+) -> dict[str, object]:
     ticket = await scoped_ticket(ticket_id, user, db)
+    followup, task = await resolve_attachment_source(db, ticket, user, followup_id, task_id)
     content = await document.read(MAX_FILE_BYTES + 1)
     try:
         validated = validate_attachment(content, document.filename)
@@ -104,15 +105,11 @@ async def upload_document(ticket_id: int, user: CurrentUser, db: DbSession, docu
         raise HTTPException(status_code=error.status_code, detail=error.detail) from error
 
     # The ticket row lock serialises concurrent uploads so the per-ticket limit cannot be exceeded.
+    # The count includes documents the user cannot see; only the message differs.
     await db.scalar(select(Ticket.id).where(Ticket.id == ticket.id).with_for_update())
-    existing = await db.scalar(
-        select(func.count(TicketDocument.id)).where(
-            TicketDocument.ticket_id == ticket.id,
-            TicketDocument.removed_at.is_(None),
-        )
-    )
-    if (existing or 0) >= MAX_FILES_PER_TICKET:
-        raise HTTPException(status_code=422, detail=TOO_MANY_FILES_MESSAGE)
+    if await live_document_count(db, ticket.id) >= MAX_FILES_PER_TICKET:
+        raise HTTPException(status_code=422, detail=limit_message(user))
+    first_for_reply = followup is not None and await live_document_count(db, ticket.id, followup_id=followup.id) == 0
 
     UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     path = UPLOAD_ROOT / f"{uuid4().hex}{validated.extension}"
@@ -125,6 +122,8 @@ async def upload_document(ticket_id: int, user: CurrentUser, db: DbSession, docu
             uploaded_by=user.id,
             content_type=validated.content_type,
             size_bytes=len(content),
+            followup_id=followup.id if followup else None,
+            task_id=task.id if task else None,
         )
         db.add(record)
         await db.flush()
@@ -140,6 +139,8 @@ async def upload_document(ticket_id: int, user: CurrentUser, db: DbSession, docu
                 "size_bytes": len(content),
                 "content_type": validated.content_type,
                 "actor_id": user.id,
+                "followup_id": record.followup_id,
+                "task_id": record.task_id,
             },
         )
         await db.commit()
@@ -147,13 +148,15 @@ async def upload_document(ticket_id: int, user: CurrentUser, db: DbSession, docu
         path.unlink(missing_ok=True)
         raise
     await db.refresh(record)
+    if followup is not None and first_for_reply and not followup.is_private and followup.body == "":
+        send_ticket_notification.delay(ticket.id, "public_reply")
     return document_view(record, user.name, user, ticket)
 
 
 @router.get("/tickets/{ticket_id}/documents/{document_id}")
 async def download_document(ticket_id: int, document_id: int, user: CurrentUser, db: DbSession) -> FileResponse:
     ticket = await scoped_ticket(ticket_id, user, db)
-    document = await get_active_document(db, ticket, document_id)
+    document = await get_visible_document(db, ticket, user, document_id)
     response = FileResponse(stored_file(document), media_type="application/octet-stream")
     response.headers["Content-Disposition"] = content_disposition(document.filename)
     response.headers.update(PROTECTIVE_HEADERS)
@@ -163,7 +166,7 @@ async def download_document(ticket_id: int, document_id: int, user: CurrentUser,
 @router.get("/tickets/{ticket_id}/documents/{document_id}/preview")
 async def preview_document(ticket_id: int, document_id: int, user: CurrentUser, db: DbSession) -> FileResponse:
     ticket = await scoped_ticket(ticket_id, user, db)
-    document = await get_active_document(db, ticket, document_id)
+    document = await get_visible_document(db, ticket, user, document_id)
     path = stored_file(document)
     with path.open("rb") as handle:
         detected = detect_document_type(handle.read(16))
@@ -178,7 +181,7 @@ async def preview_document(ticket_id: int, document_id: int, user: CurrentUser, 
 @router.delete("/tickets/{ticket_id}/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_document(ticket_id: int, document_id: int, user: CurrentUser, db: DbSession) -> None:
     ticket = await scoped_ticket(ticket_id, user, db)
-    document = await get_active_document(db, ticket, document_id)
+    document = await get_visible_document(db, ticket, user, document_id)
     if not can_remove_document(user, ticket, document):
         raise HTTPException(status_code=403, detail="You cannot remove this attachment")
     document.removed_at = datetime.now(UTC)

@@ -67,7 +67,7 @@ function errorMessage(xhr: XMLHttpRequest): string {
   return "Upload failed. You can retry or remove this file.";
 }
 
-function uploadOne(ticketId: number, file: File, headers: Record<string, string>, onProgress: (percent: number) => void): Promise<number> {
+function uploadOne(ticketId: number, file: File, headers: Record<string, string>, onProgress: (percent: number) => void, extra: Record<string, string>): Promise<number> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `/api/v1/tickets/${ticketId}/documents`);
@@ -87,12 +87,14 @@ function uploadOne(ticketId: number, file: File, headers: Record<string, string>
     xhr.onerror = () => reject(new Error("Network error. You can retry or remove this file."));
     const form = new FormData();
     form.append("document", file);
+    Object.entries(extra).forEach(([key, value]) => form.append(key, value));
     xhr.send(form);
   });
 }
 
 // Uploads the given items one at a time; a failure marks only that item and never blocks the rest.
-export async function uploadItems(ticketId: number, ids: string[], items: AttachmentItem[], setItems: SetItems, headers: Record<string, string>): Promise<number> {
+// `extra` carries the source link (for example { followup_id: "12" }) for replies and notes.
+export async function uploadItems(ticketId: number, ids: string[], items: AttachmentItem[], setItems: SetItems, headers: Record<string, string>, extra: Record<string, string> = {}): Promise<number> {
   let failed = 0;
   const patch = (id: string, change: Partial<AttachmentItem>) =>
     setItems((current) => current.map((item) => (item.id === id ? { ...item, ...change } : item)));
@@ -101,7 +103,7 @@ export async function uploadItems(ticketId: number, ids: string[], items: Attach
     if (!item || item.status === "done") continue;
     patch(id, { status: "uploading", progress: 0, error: undefined });
     try {
-      const remoteId = await uploadOne(ticketId, item.file, headers, (progress) => patch(id, { progress }));
+      const remoteId = await uploadOne(ticketId, item.file, headers, (progress) => patch(id, { progress }), extra);
       patch(id, { status: "done", progress: 100, remoteId });
     } catch (error) {
       failed += 1;

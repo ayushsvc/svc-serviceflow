@@ -24,9 +24,11 @@ type AttachmentDropzoneProps = {
   ticketId?: number | null;
   existingCount?: number;
   disabled?: boolean;
+  // Extra form fields for every upload, for example { followup_id: "12" }.
+  uploadFields?: Record<string, string>;
 };
 
-export default function AttachmentDropzone({ label = "Attachments", items, setItems, headers, ticketId = null, existingCount = 0, disabled = false }: AttachmentDropzoneProps) {
+export default function AttachmentDropzone({ label = "Attachments", items, setItems, headers, ticketId = null, existingCount = 0, disabled = false, uploadFields }: AttachmentDropzoneProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const itemsRef = useRef(items);
@@ -88,7 +90,7 @@ export default function AttachmentDropzone({ label = "Attachments", items, setIt
       setItems((current) => current.map((candidate) => (candidate.id === item.id ? { ...candidate, status: "pending", error: undefined } : candidate)));
       return;
     }
-    await uploadItems(ticketId, [item.id], itemsRef.current, setItems, headers);
+    await uploadItems(ticketId, [item.id], itemsRef.current, setItems, headers, uploadFields);
   }
 
   return (

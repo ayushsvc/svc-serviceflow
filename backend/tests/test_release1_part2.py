@@ -261,9 +261,12 @@ async def test_sixth_file_is_rejected_with_a_clear_message_and_removal_frees_a_s
         response = await upload(attachments_http, ticket_id, f"file{index}.txt", f"file {index}".encode())
         assert response.status_code == 201, response.text
         first_id = first_id or response.json()["id"]
-    sixth = await upload(attachments_http, ticket_id, "sixth.txt", b"sixth")
+    sixth = await upload(attachments_http, ticket_id, "sixth.txt", b"sixth", user="A_staff")
     assert sixth.status_code == 422
     assert "at most 5 attachments" in sixth.json()["detail"]
+    requester_sixth = await upload(attachments_http, ticket_id, "sixth.txt", b"sixth")
+    assert requester_sixth.status_code == 422
+    assert requester_sixth.json()["detail"] == "Attachment limit reached"
 
     attachments_http["state"]["user"] = attachments_http["users"]["A_staff"]
     removed = await attachments_http["client"].delete(f"/api/v1/tickets/{ticket_id}/documents/{first_id}")
