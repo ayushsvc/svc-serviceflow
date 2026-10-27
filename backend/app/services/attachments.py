@@ -292,7 +292,7 @@ async def get_visible_document(db: AsyncSession, ticket: Ticket, user: User, doc
         )
     )
     if document is None:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail="Not found")
     return document
 
 
@@ -347,13 +347,15 @@ def limit_message(user: User) -> str:
     return TOO_MANY_FILES_MESSAGE if can_see_private_items(user) else GENERIC_LIMIT_MESSAGE
 
 
-def infer_content_type(path: Path, filename: str) -> str | None:
+def infer_content_type(path: Path | None, filename: str) -> str | None:
     """Content type for legacy rows that were stored without one."""
-    try:
-        with path.open("rb") as handle:
-            head = handle.read(16)
-    except OSError:
-        head = b""
+    head = b""
+    if path is not None:
+        try:
+            with path.open("rb") as handle:
+                head = handle.read(16)
+        except OSError:
+            head = b""
     detected = detect_document_type(head) if head else None
     if detected:
         return detected

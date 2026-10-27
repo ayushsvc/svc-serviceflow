@@ -1,3 +1,6 @@
+import logging
+import os
+
 import pytest
 from sqlalchemy import select
 
@@ -7,6 +10,8 @@ from test_release1_part2 import attachments_http, new_ticket  # noqa: F401
 
 PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 32
 TEXT = b"hello attachment"
+SECRET = PNG + b"TOPSECRET-OUTSIDE-UPLOADS"
+NOT_FOUND = {"detail": "Not found"}
 
 
 @pytest.fixture
@@ -202,6 +207,137 @@ async def test_private_attachment_only_reply_never_notifies_and_is_staff_only(at
     assert notifications == []
     assert [item for item in (await get(attachments_http, f"{ticket_id}/timeline", user="A_requester")).json() if item["kind"] == "followup"] == []
     assert [item["body"] for item in (await get(attachments_http, f"{ticket_id}/timeline", user="A_staff")).json() if item["kind"] == "followup"] == ["Attached 1 file"]
+
+
+@pytest.mark.asyncio
+async def test_out_of_root_legacy_paths_are_never_served(attachments_http, tmp_path_factory) -> None:
+    ticket_id = await new_ticket(attachments_http)
+    root = attachments_http["root"]
+    outside_dir = tmp_path_factory.mktemp("outside-uploads")
+    outside = outside_dir / "secret.png"
+    outside.write_bytes(SECRET)
+    link = root / "link.png"
+    link.symlink_to(outside)
+    paths = {
+        "absolute.png": str(outside),
+        "dotdot.png": str(root / os.path.relpath(outside, root)),
+        "symlink.png": str(link),
+    }
+    uploader = attachments_http["users"]["A_requester"]
+    db = attachments_http["db"]
+    rows = {name: TicketDocument(ticket_id=ticket_id, filename=name, path=path, uploaded_by=uploader.id) for name, path in paths.items()}
+    db.add_all(rows.values())
+    await db.flush()
+
+    for user in ("A_requester", "A_staff"):
+        listing = await get(attachments_http, f"{ticket_id}/documents", user=user)
+        assert listing.status_code == 200
+        for item in listing.json():
+            assert item["size_bytes"] is None, item["filename"]
+            assert item["file_missing"] is False, item["filename"]
+        for name, row in rows.items():
+            for suffix in ("", "/preview"):
+                response = await get(attachments_http, f"{ticket_id}/documents/{row.id}{suffix}", user=user)
+                assert response.status_code == 404, (name, suffix)
+                assert response.json() == NOT_FOUND
+                assert b"TOPSECRET" not in response.content
+
+
+@pytest.mark.asyncio
+async def test_download_and_preview_return_the_same_404_for_missing_out_of_root_removed_and_hidden_documents(attachments_http, tmp_path_factory) -> None:
+    ticket_id = await new_ticket(attachments_http)
+    root = attachments_http["root"]
+    outside = tmp_path_factory.mktemp("outside-uploads") / "secret.png"
+    outside.write_bytes(SECRET)
+    uploader = attachments_http["users"]["A_requester"]
+    db = attachments_http["db"]
+    missing = TicketDocument(ticket_id=ticket_id, filename="missing.png", path=str(root / "gone.png"), uploaded_by=uploader.id)
+    out_of_root = TicketDocument(ticket_id=ticket_id, filename="outside.png", path=str(outside), uploaded_by=uploader.id)
+    db.add_all([missing, out_of_root])
+    await db.flush()
+
+    removed = await upload_to(attachments_http, ticket_id, "removed.png", PNG, user="A_staff")
+    assert removed.status_code == 201
+    as_user(attachments_http, "A_staff")
+    assert (await attachments_http["client"].delete(f"/api/v1/tickets/{ticket_id}/documents/{removed.json()['id']}")).status_code == 204
+    _, hidden_id = await private_attachment(attachments_http, ticket_id)
+
+    cases = [
+        ("A_staff", missing.id),
+        ("A_staff", out_of_root.id),
+        ("A_staff", removed.json()["id"]),
+        ("A_requester", hidden_id),
+        ("A_requester", 999999999),
+    ]
+    responses = set()
+    for user, document_id in cases:
+        for suffix in ("", "/preview"):
+            response = await get(attachments_http, f"{ticket_id}/documents/{document_id}{suffix}", user=user)
+            responses.add((response.status_code, response.text))
+    assert responses == {(404, '{"detail":"Not found"}')}
+
+    listed = {item["filename"]: item for item in (await get(attachments_http, f"{ticket_id}/documents", user="A_staff")).json()}
+    assert listed["missing.png"]["file_missing"] is True
+    assert listed["outside.png"]["file_missing"] is False
+    assert listed["secret.png"]["file_missing"] is False
+    assert "removed.png" not in listed
+
+
+@pytest.mark.asyncio
+async def test_missing_and_out_of_root_files_log_a_warning_without_the_path(attachments_http, tmp_path_factory, caplog) -> None:
+    ticket_id = await new_ticket(attachments_http)
+    root = attachments_http["root"]
+    outside = tmp_path_factory.mktemp("outside-uploads") / "secret.png"
+    outside.write_bytes(SECRET)
+    uploader = attachments_http["users"]["A_requester"]
+    db = attachments_http["db"]
+    missing = TicketDocument(ticket_id=ticket_id, filename="missing.png", path=str(root / "gone-from-disk.png"), uploaded_by=uploader.id)
+    out_of_root = TicketDocument(ticket_id=ticket_id, filename="outside.png", path=str(outside), uploaded_by=uploader.id)
+    db.add_all([missing, out_of_root])
+    await db.flush()
+    entity_id = attachments_http["entities"]["A"].id
+
+    with caplog.at_level(logging.WARNING):
+        for document in (missing, out_of_root):
+            response = await get(attachments_http, f"{ticket_id}/documents/{document.id}", user="A_staff")
+            assert response.status_code == 404
+            assert "gone-from-disk" not in response.text and str(outside) not in response.text
+
+    messages = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    for document, reason in ((missing, "missing"), (out_of_root, "outside")):
+        matching = [m for m in messages if f"document_id={document.id}" in m]
+        assert matching, document.filename
+        assert f"ticket_id={ticket_id}" in matching[0] and f"entity_id={entity_id}" in matching[0]
+        assert reason in matching[0]
+    assert all("gone-from-disk" not in m and str(outside) not in m for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_legacy_document_with_missing_file_does_not_500(attachments_http) -> None:
+    ticket_id = await new_ticket(attachments_http)
+    root = attachments_http["root"]
+    intact = root / "legacy-intact.txt"
+    intact.write_bytes(b"still here")
+    uploader = attachments_http["users"]["A_requester"]
+    db = attachments_http["db"]
+    gone = TicketDocument(ticket_id=ticket_id, filename="gone.png", path=str(root / "deleted-from-disk.png"), uploaded_by=uploader.id)
+    present = TicketDocument(ticket_id=ticket_id, filename="here.txt", path=str(intact), uploaded_by=uploader.id)
+    db.add_all([gone, present])
+    await db.flush()
+
+    for user in ("A_requester", "A_staff"):
+        listing = await get(attachments_http, f"{ticket_id}/documents", user=user)
+        assert listing.status_code == 200
+        listed = {item["filename"]: item for item in listing.json()}
+        assert listed["gone.png"]["size_bytes"] is None
+        assert listed["gone.png"]["file_missing"] is True
+        assert listed["here.txt"]["size_bytes"] == len(b"still here")
+        assert listed["here.txt"]["file_missing"] is False
+        for suffix in ("", "/preview"):
+            response = await get(attachments_http, f"{ticket_id}/documents/{gone.id}{suffix}", user=user)
+            assert response.status_code == 404, suffix
+            assert response.json()["detail"] == "Not found"
+        assert (await get(attachments_http, f"{ticket_id}/documents/{present.id}", user=user)).status_code == 200
 
 
 @pytest.mark.asyncio

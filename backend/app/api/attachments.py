@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -27,6 +28,7 @@ from app.services.attachments import (
 from app.services.audit import record_audit
 from app.workers.tasks import send_ticket_notification
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["attachments"])
 UPLOAD_ROOT = Path("/app/data/documents")
 PROTECTIVE_HEADERS = {
@@ -42,21 +44,45 @@ def can_remove_document(user: User, ticket: Ticket, document: TicketDocument) ->
     return document.uploaded_by == user.id and ticket.status == "NEW"
 
 
+def locate_stored_file(document: TicketDocument) -> tuple[Path | None, str]:
+    """Resolve the stored path; only files inside the uploads root are ever usable.
+
+    Returns (path, "ok") or (None, "missing" | "outside").
+    """
+    root = UPLOAD_ROOT.resolve()
+    try:
+        path = Path(document.path).resolve()
+        if root not in path.parents:
+            return None, "outside"
+        if not path.is_file():
+            return None, "missing"
+    except (OSError, ValueError):
+        return None, "missing"
+    return path, "ok"
+
+
 def stored_size(document: TicketDocument) -> int | None:
     if document.size_bytes is not None:
         return document.size_bytes
+    path, _ = locate_stored_file(document)
+    if path is None:
+        return None
     try:
-        return Path(document.path).stat().st_size
+        return path.stat().st_size
     except OSError:
         return None
 
 
 def effective_content_type(document: TicketDocument) -> str | None:
-    return document.content_type or infer_content_type(Path(document.path), document.filename)
+    if document.content_type:
+        return document.content_type
+    path, _ = locate_stored_file(document)
+    return infer_content_type(path, document.filename)
 
 
 def document_view(document: TicketDocument, uploader_name: str | None, user: User, ticket: Ticket) -> dict[str, object]:
     content_type = effective_content_type(document)
+    missing = locate_stored_file(document)[1] == "missing"
     return {
         "id": document.id,
         "filename": document.filename,
@@ -67,16 +93,23 @@ def document_view(document: TicketDocument, uploader_name: str | None, user: Use
         "created_at": document.created_at,
         "followup_id": document.followup_id,
         "task_id": document.task_id,
-        "previewable": content_type in PREVIEW_CONTENT_TYPES,
+        "previewable": content_type in PREVIEW_CONTENT_TYPES and locate_stored_file(document)[0] is not None,
+        "file_missing": missing,
         "can_remove": can_remove_document(user, ticket, document),
     }
 
 
-def stored_file(document: TicketDocument) -> Path:
-    root = UPLOAD_ROOT.resolve()
-    path = Path(document.path).resolve()
-    if root not in path.parents or not path.is_file():
-        raise HTTPException(status_code=404, detail="Document not found")
+def stored_file(document: TicketDocument, ticket: Ticket) -> Path:
+    path, state = locate_stored_file(document)
+    if path is None:
+        logger.warning(
+            "Attachment file unavailable: document_id=%s ticket_id=%s entity_id=%s reason=%s",
+            document.id,
+            ticket.id,
+            ticket.entity_id,
+            "outside_uploads_root" if state == "outside" else "missing",
+        )
+        raise HTTPException(status_code=404, detail="Not found")
     return path
 
 
@@ -157,7 +190,7 @@ async def upload_document(
 async def download_document(ticket_id: int, document_id: int, user: CurrentUser, db: DbSession) -> FileResponse:
     ticket = await scoped_ticket(ticket_id, user, db)
     document = await get_visible_document(db, ticket, user, document_id)
-    response = FileResponse(stored_file(document), media_type="application/octet-stream")
+    response = FileResponse(stored_file(document, ticket), media_type="application/octet-stream")
     response.headers["Content-Disposition"] = content_disposition(document.filename)
     response.headers.update(PROTECTIVE_HEADERS)
     return response
@@ -167,7 +200,7 @@ async def download_document(ticket_id: int, document_id: int, user: CurrentUser,
 async def preview_document(ticket_id: int, document_id: int, user: CurrentUser, db: DbSession) -> FileResponse:
     ticket = await scoped_ticket(ticket_id, user, db)
     document = await get_visible_document(db, ticket, user, document_id)
-    path = stored_file(document)
+    path = stored_file(document, ticket)
     with path.open("rb") as handle:
         detected = detect_document_type(handle.read(16))
     if detected not in PREVIEW_CONTENT_TYPES:
