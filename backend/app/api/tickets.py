@@ -2,7 +2,7 @@ import json
 import math
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import String, and_, desc, false, func, or_, select, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.elements import ColumnElement
@@ -17,9 +17,25 @@ from app.services.field_engine import REQUESTER_FORM_FIELDS, field_role_for_user
 from app.services.content import rich_text_to_plain, sanitize_rich_text, sanitize_ticket_description
 from app.services.attachments import can_see_private_items, live_followup_filter, visible_document_filter
 from app.services.bulk_tickets import apply_ticket_update, bulk_update_tickets as run_bulk_ticket_update, dispatch_ticket_update_effects
+from app.services.ticket_filters import (
+    TicketFilters,
+    all_filters,
+    coerce_filters,
+    escape_like as escape_ticket_search,
+    extra_filters,
+    priority_filter_options,
+    status_label,
+    status_options,
+    ticket_filter_conditions,
+    validate_filter_profile,
+)
 
 router = APIRouter(tags=["tickets"])
-PROFILE_FILTER_KEYS = {"search", "status", "priority", "sort", "direction", "page_size"}
+PROFILE_FILTER_KEYS = {
+    "search", "status", "priority", "sort", "direction", "page_size",
+    "assignee_id", "requester_id", "ticket_type_id", "category_id",
+    "created_from", "created_to", "updated_from", "updated_to",
+}
 PROFILE_SORT_FIELDS = {"id", "opened_at", "priority", "status", "title"}
 PROFILE_COLUMNS = {"id", "title", "status", "priority", "opened_at", "requester_name", "requester_active", "requester_vip", "flagged", "assignee_id", "ttr_due_at"}
 PROFILE_STATUSES = {"NEW", "ASSIGNED", "PLANNED", "PENDING", "SOLVED", "CLOSED"}
@@ -112,10 +128,6 @@ async def get_scoped_ticket(ticket_id: int, user: User, db: DbSession) -> Ticket
     )
 
 
-def escape_ticket_search(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
 def ticket_response_data(ticket: Ticket, user: User) -> dict[str, Any]:
     data = {
         field: getattr(ticket, field)
@@ -123,6 +135,7 @@ def ticket_response_data(ticket: Ticket, user: User) -> dict[str, Any]:
         if field != "priority_label" and hasattr(ticket, field)
     }
     data["description"] = sanitize_rich_text(ticket.description or "")
+    data["status_label"] = status_label(ticket.status)
     data["priority_label"] = priority_label(
         ticket.priority,
         requester=field_role_for_user(user) == "Requester",
@@ -168,10 +181,7 @@ def validate_profile_config(kind: str, config: dict) -> dict:
     if kind == "filter":
         if "search" in config and (not isinstance(config["search"], str) or len(config["search"]) > 160):
             raise HTTPException(status_code=422, detail="Filter search must be a string of at most 160 characters")
-        if "status" in config and (not isinstance(config["status"], str) or config["status"] not in PROFILE_STATUSES):
-            raise HTTPException(status_code=422, detail="Unsupported filter status")
-        if "priority" in config and (type(config["priority"]) is not int or not 1 <= config["priority"] <= 5):
-            raise HTTPException(status_code=422, detail="Filter priority must be between 1 and 5")
+        validate_filter_profile(config)
         if "page_size" in config and (type(config["page_size"]) is not int or not 1 <= config["page_size"] <= 100):
             raise HTTPException(status_code=422, detail="Filter page_size must be between 1 and 100")
         if "direction" in config and (not isinstance(config["direction"], str) or config["direction"] not in {"asc", "desc"}):
@@ -384,14 +394,15 @@ async def assignable_users(
 async def list_tickets(
     user: CurrentUser,
     db: DbSession,
-    ticket_status: str | None = Query(default=None, alias="status"),
-    priority: int | None = Query(default=None, ge=1, le=5),
+    ticket_status: list[str] | None = Query(default=None, alias="status"),
+    priority: list[str] | None = Query(default=None),
     search: str | None = Query(default=None, max_length=160),
     sort: str = Query(default="opened_at"),
     direction: str = Query(default="desc", pattern="^(asc|desc)$"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
     queue: str | None = Query(default=None, pattern="^(mine|teams|unassigned)$"),
+    extra: TicketFilters | None = Depends(extra_filters),
 ) -> dict:
     sort_columns = {
         "id": Ticket.id,
@@ -406,18 +417,8 @@ async def list_tickets(
         raise HTTPException(status_code=403, detail="Ticket queue access required")
     conditions = [Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None)]
     conditions.append(ticket_visibility_scope(user, queue))
-    if ticket_status:
-        conditions.append(Ticket.status == ticket_status)
-    if priority is not None:
-        conditions.append(Ticket.priority == priority)
-    if search:
-        escaped = escape_ticket_search(search.strip())
-        pattern = f"%{escaped}%"
-        conditions.append(or_(
-            Ticket.title.ilike(pattern, escape="\\"),
-            Ticket.description.ilike(pattern, escape="\\"),
-            Ticket.id.cast(String).ilike(pattern, escape="\\"),
-        ))
+    filters = coerce_filters(extra).with_basics(ticket_status, priority, search)
+    conditions.extend(await ticket_filter_conditions(db, user, filters))
     base = select(Ticket, User).join(User, User.id == Ticket.requester_id).where(*conditions)
     total = await db.scalar(select(func.count()).select_from(base.subquery())) or 0
     order_column = sort_columns[sort]
@@ -427,6 +428,7 @@ async def list_tickets(
         {
             **{column: getattr(ticket, column) for column in TicketRead.model_fields if hasattr(ticket, column)},
             "description": sanitize_rich_text(ticket.description or ""),
+            "status_label": status_label(ticket.status),
             "requester_name": requester.name if user.profile.interface != "self_service" else None,
             "requester_active": requester.is_active if user.profile.interface != "self_service" else None,
             "requester_vip": False if user.profile.interface != "self_service" else None,
@@ -451,8 +453,13 @@ async def list_tickets(
 
 
 @router.get("/tickets/team-counts")
-async def ticket_team_counts(user: CurrentUser, db: DbSession) -> list[dict[str, int | str | None]]:
-    conditions = [Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None), ticket_visibility_scope(user)]
+async def ticket_team_counts(
+    user: CurrentUser,
+    db: DbSession,
+    filters: TicketFilters | None = Depends(all_filters),
+) -> list[dict[str, int | str | None]]:
+    filter_conditions = await ticket_filter_conditions(db, user, coerce_filters(filters))
+    conditions = [Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None), ticket_visibility_scope(user), *filter_conditions]
     route_team_id = ticket_route_team_id()
     rows = await db.execute(
         select(Group.id, Group.name, func.count(Ticket.id))
@@ -470,6 +477,7 @@ async def ticket_team_counts(user: CurrentUser, db: DbSession) -> list[dict[str,
             Ticket.deleted_at.is_(None),
             unassigned_predicate(),
             ticket_visibility_scope(user, "unassigned") if has_profile_right(user, "ticket:view_queue") or has_profile_right(user, "ticket:view_all") else ticket_visibility_scope(user),
+            *filter_conditions,
         )
     ) or 0
     result.append({"team_id": None, "team_name": "Unassigned", "count": unassigned})
@@ -477,15 +485,21 @@ async def ticket_team_counts(user: CurrentUser, db: DbSession) -> list[dict[str,
 
 
 @router.get("/tickets/queue-counts")
-async def ticket_queue_counts(user: CurrentUser, db: DbSession) -> dict[str, int]:
+async def ticket_queue_counts(
+    user: CurrentUser,
+    db: DbSession,
+    filters: TicketFilters | None = Depends(all_filters),
+) -> dict[str, int]:
     if not has_profile_right(user, "ticket:view_queue"):
         raise HTTPException(status_code=403, detail="Ticket queue access required")
+    filter_conditions = await ticket_filter_conditions(db, user, coerce_filters(filters))
     counts = {
         "all": await db.scalar(
             select(func.count(Ticket.id)).where(
                 Ticket.entity_id == user.entity_id,
                 Ticket.deleted_at.is_(None),
                 ticket_visibility_scope(user),
+                *filter_conditions,
             )
         ) or 0
     }
@@ -495,9 +509,51 @@ async def ticket_queue_counts(user: CurrentUser, db: DbSession) -> dict[str, int
                 Ticket.entity_id == user.entity_id,
                 Ticket.deleted_at.is_(None),
                 ticket_visibility_scope(user, queue),
+                *filter_conditions,
             )
         ) or 0
     return counts
+
+
+@router.get("/tickets/filter-options")
+async def ticket_filter_options(user: CurrentUser, db: DbSession) -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "statuses": status_options(),
+        "priorities": priority_filter_options(),
+        "date_fields": ["created"],
+    }
+    if user.profile.interface == "self_service":
+        return options
+    visible = (Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None), ticket_visibility_scope(user))
+
+    async def people(column: Any) -> list[dict[str, Any]]:
+        rows = await db.execute(
+            select(User.id, User.name, User.is_active)
+            .where(User.entity_id == user.entity_id, User.id.in_(select(column).where(*visible, column.is_not(None))))
+            .order_by(User.name, User.id)
+            .limit(200)
+        )
+        return [{"id": row.id, "name": row.name, "is_active": row.is_active} for row in rows.all()]
+
+    categories_rows = await db.execute(select(Category.id, Category.name).where(Category.entity_id == user.entity_id).order_by(Category.name))
+    types_rows = await db.execute(
+        select(TicketTypeDefinition.id, TicketTypeDefinition.name)
+        .where(
+            TicketTypeDefinition.is_active.is_(True),
+            or_(TicketTypeDefinition.entity_id.is_(None), TicketTypeDefinition.entity_id == user.entity_id),
+        )
+        .order_by(TicketTypeDefinition.name)
+    )
+    options.update(
+        {
+            "date_fields": ["created", "updated"],
+            "assignees": await people(Ticket.assignee_id),
+            "requesters": await people(Ticket.requester_id),
+            "ticket_types": [{"id": row.id, "name": row.name} for row in types_rows.all()],
+            "categories": [{"id": row.id, "name": row.name} for row in categories_rows.all()],
+        }
+    )
+    return options
 
 
 @router.get("/tickets/list-profiles", response_model=list[ListProfileRead])

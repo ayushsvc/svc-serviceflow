@@ -183,6 +183,7 @@ class TicketRead(BaseModel):
     impact: int
     priority: int
     priority_label: str | None = None
+    status_label: str | None = None
     category_id: int | None
     entity_id: int
     source: str
