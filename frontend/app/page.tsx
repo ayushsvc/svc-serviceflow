@@ -1,6 +1,11 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import FilterBar from "./components/FilterBar";
+import {
+  FilterOptions, QueueName, TicketFilters, appendFilterParams, emptyFilters, filtersEqual, filtersFromProfile, filtersToProfile,
+  hasStaffOnlyFilters, optionsFromResponse, parseUrl, serialiseUrl, stripStaffFilters, urlHasFilters,
+} from "./lib/ticketFilters";
 import AssignPicker from "./components/AssignPicker";
 import RequesterTicketForm from "./components/RequesterTicketForm";
 import AttachmentDropzone from "./components/AttachmentDropzone";
@@ -31,6 +36,7 @@ type Ticket = {
   title: string;
   description: string;
   status: string;
+  status_label?: string | null;
   priority: number;
   priority_label?: string | null;
   urgency?: number;
@@ -157,10 +163,17 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   const [selected, setSelected] = useState<Ticket | null>(null);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("All tickets");
-  const [priorityFilter, setPriorityFilter] = useState("All priorities");
+  const [filters, setFilters] = useState<TicketFilters>(emptyFilters);
+  const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null);
+  const [filterOptionsError, setFilterOptionsError] = useState("");
+  const [listLoading, setListLoading] = useState(false);
+  const [urlReady, setUrlReady] = useState(false);
+  const [userLoaded, setUserLoaded] = useState(false);
+  const urlHadState = useRef(false);
+  const urlHadQueue = useRef(false);
+  const queueDefaulted = useRef(false);
+  const loadSeq = useRef(0);
   const [priorityOptions, setPriorityOptions] = useState<PriorityOption[]>([]);
-  const [filterOpen, setFilterOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [activeNav, setActiveNav] = useState("Tickets");
   const [showDrawer, setShowDrawer] = useState(true);
@@ -224,34 +237,59 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   const requesterAccess = Boolean(currentUser?.profile.rights?.["ticket:own_only"]);
   const draftKey = currentUser ? `svc-ticket-draft:${currentUser.id}` : null;
 
+  const activeFilters = requesterAccess ? stripStaffFilters(filters) : filters;
+  function changeFilters(next: TicketFilters) {
+    setFilters(next);
+    setListPage(1);
+    setActiveListProfileId("");
+  }
+
   const apiHeaders = { Authorization: `Bearer ${token.access_token}` };
+  function listErrorMessage(status: number) {
+    if (status === 422) return "Some filter values are not valid. Check the date range and selected options, then try again.";
+    if (status === 403) return "You do not have access to one or more of the selected filters.";
+    return "Unable to load tickets.";
+  }
   async function loadTickets() {
+    const seq = ++loadSeq.current;
+    setListLoading(true);
     const params = new URLSearchParams({
       page: String(listPage),
       page_size: String(listPageSize),
       sort: listSort,
       direction: listDirection,
     });
+    const filterParams = new URLSearchParams();
+    appendFilterParams(filterParams, activeFilters);
+    if (query.trim()) filterParams.set("search", query.trim());
+    filterParams.forEach((value, key) => params.append(key, value));
     if (tabsAccess && queueFilter !== "all") params.set("queue", queueFilter);
-    if (query.trim()) params.set("search", query.trim());
-    if (statusFilter !== "All tickets") params.set("status", statusFilter);
-    if (priorityFilter !== "All priorities") params.set("priority", priorityFilter);
-    const response = await fetch(`/api/v1/tickets?${params.toString()}`, { headers: apiHeaders });
-    if (!response.ok) { setError("Unable to load tickets."); return; }
-    const result = (await response.json()) as {
-      items: Ticket[];
-      total: number;
-      priority_options: PriorityOption[];
-    };
-    setTickets(result.items);
-    setListTotal(result.total);
-    setPriorityOptions(result.priority_options ?? []);
-    if (tabsAccess) {
-      const queueResponse = await fetch("/api/v1/tickets/queue-counts", { headers: apiHeaders });
-      if (queueResponse.ok) setQueueCounts(await queueResponse.json() as typeof queueCounts);
+    try {
+      const response = await fetch(`/api/v1/tickets?${params.toString()}`, { headers: apiHeaders });
+      if (seq !== loadSeq.current) return;
+      if (!response.ok) { setError(listErrorMessage(response.status)); return; }
+      const result = (await response.json()) as {
+        items: Ticket[];
+        total: number;
+        priority_options: PriorityOption[];
+      };
+      if (seq !== loadSeq.current) return;
+      setError("");
+      setTickets(result.items);
+      setListTotal(result.total);
+      setPriorityOptions(result.priority_options ?? []);
+      const countQuery = filterParams.toString() ? `?${filterParams.toString()}` : "";
+      if (tabsAccess) {
+        const queueResponse = await fetch(`/api/v1/tickets/queue-counts${countQuery}`, { headers: apiHeaders });
+        if (queueResponse.ok && seq === loadSeq.current) setQueueCounts(await queueResponse.json() as typeof queueCounts);
+      }
+      const countsResponse = await fetch(`/api/v1/tickets/team-counts${countQuery}`, { headers: apiHeaders });
+      if (countsResponse.ok && seq === loadSeq.current) setTeamCounts((await countsResponse.json()) as Array<{ team_id: number | null; count: number }>);
+    } catch {
+      if (seq === loadSeq.current) setError("Unable to load tickets.");
+    } finally {
+      if (seq === loadSeq.current) setListLoading(false);
     }
-    const countsResponse = await fetch("/api/v1/tickets/team-counts", { headers: apiHeaders });
-    if (countsResponse.ok) setTeamCounts((await countsResponse.json()) as Array<{ team_id: number | null; count: number }>);
   }
   function applyListProfile(profile: SavedListProfile | undefined) {
     setActiveListProfileId(profile ? String(profile.id) : "");
@@ -263,8 +301,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     }
     const config = profile.config;
     setQuery(typeof config.search === "string" ? config.search : "");
-    setStatusFilter(typeof config.status === "string" ? config.status : "All tickets");
-    setPriorityFilter(typeof config.priority === "number" ? String(config.priority) : "All priorities");
+    setFilters(filtersFromProfile(config));
     setListSort(typeof config.sort === "string" ? config.sort : "opened_at");
     setListDirection(config.direction === "asc" ? "asc" : "desc");
     setListPageSize(typeof config.page_size === "number" ? config.page_size : 25);
@@ -277,8 +314,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
       ? { columns: listColumns }
       : {
         ...(query.trim() ? { search: query.trim() } : {}),
-        ...(statusFilter !== "All tickets" ? { status: statusFilter } : {}),
-        ...(priorityFilter !== "All priorities" ? { priority: Number(priorityFilter) } : {}),
+        ...filtersToProfile(activeFilters),
         sort: listSort,
         direction: listDirection,
         page_size: listPageSize,
@@ -347,11 +383,53 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     setError("");
     await loadTickets();
   }
-  useEffect(() => { void loadTickets(); }, [query, statusFilter, priorityFilter, listPage, listPageSize, listSort, listDirection, queueFilter, tabsAccess]);
-  useEffect(() => { if (viewAllAccess) { setQueueFilter("unassigned"); setListPage(1); } }, [viewAllAccess]);
   useEffect(() => {
-    void fetch("/api/v1/auth/me", { headers: apiHeaders }).then((response) => response.ok ? response.json() : null).then((user: CurrentUser | null) => setCurrentUser(user));
+    const { filters: urlFilters, search, queue } = parseUrl(window.location.search);
+    urlHadState.current = urlHasFilters(window.location.search);
+    urlHadQueue.current = queue !== null;
+    setFilters(urlFilters);
+    setQuery(search);
+    if (queue) setQueueFilter(queue);
+    setUrlReady(true);
+    function onPopState() {
+      const next = parseUrl(window.location.search);
+      setFilters(next.filters);
+      setQuery(next.search);
+      setQueueFilter(next.queue ?? "all");
+      setListPage(1);
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
   }, []);
+  useEffect(() => {
+    if (!urlReady || !userLoaded) return;
+    if (viewAllAccess && !urlHadQueue.current && !queueDefaulted.current) return;
+    const queueParam = tabsAccess ? queueFilter : null;
+    const next = serialiseUrl(activeFilters, query, queueParam);
+    if (next === window.location.search) return;
+    const current = parseUrl(window.location.search);
+    const searchOnly = filtersEqual(current.filters, activeFilters) && (current.queue === queueParam || current.queue === null);
+    const url = `${window.location.pathname}${next}${window.location.hash}`;
+    if (searchOnly) window.history.replaceState(null, "", url); else window.history.pushState(null, "", url);
+  }, [urlReady, userLoaded, filters, query, queueFilter, tabsAccess, viewAllAccess, requesterAccess]);
+  useEffect(() => {
+    if (requesterAccess && hasStaffOnlyFilters(filters)) setFilters(stripStaffFilters(filters));
+  }, [requesterAccess, filters]);
+  useEffect(() => {
+    if (!urlReady || !userLoaded) return;
+    void loadTickets();
+  }, [urlReady, userLoaded, query, filters, listPage, listPageSize, listSort, listDirection, queueFilter, tabsAccess]);
+  useEffect(() => { if (viewAllAccess && !urlHadQueue.current) { queueDefaulted.current = true; setQueueFilter("unassigned"); setListPage(1); } }, [viewAllAccess]);
+  useEffect(() => {
+    void fetch("/api/v1/auth/me", { headers: apiHeaders }).then((response) => response.ok ? response.json() : null).then((user: CurrentUser | null) => setCurrentUser(user)).catch(() => undefined).finally(() => setUserLoaded(true));
+  }, []);
+  useEffect(() => {
+    if (!currentUser) return;
+    void fetch("/api/v1/tickets/filter-options", { headers: apiHeaders })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(String(response.status))))
+      .then((raw) => { setFilterOptions(optionsFromResponse(raw)); setFilterOptionsError(""); })
+      .catch(() => setFilterOptionsError("Filter options could not be loaded. Filtering by name is unavailable until you refresh."));
+  }, [currentUser]);
   useEffect(() => {
     if (!currentUser) return;
     void fetch("/api/v1/tickets/list-profiles", { headers: apiHeaders })
@@ -364,7 +442,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         setListProfiles(loaded);
         const defaultFilter = loaded.find((profile) => profile.kind === "filter" && profile.is_default);
         const defaultColumns = loaded.find((profile) => profile.kind === "column" && profile.is_default);
-        if (defaultFilter) applyListProfile(defaultFilter);
+        if (defaultFilter && !urlHadState.current) applyListProfile(defaultFilter);
         if (defaultColumns && Array.isArray(defaultColumns.config.columns)) setListColumns(defaultColumns.config.columns as TicketListColumn[]);
       }, () => setError("Unable to load saved ticket profiles."));
     if (currentUser.profile.interface === "helpdesk") {
@@ -526,17 +604,10 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     setShowCreate(false);
   }
 
-  const filteredTickets = useMemo(() => tickets.filter((ticket) => {
-    const matchesQuery = `${ticket.id} ${ticket.title} ${ticket.description}`.toLowerCase().includes(query.toLowerCase());
-    const matchesStatus = statusFilter === "All tickets" || ticket.status === statusFilter;
-    const matchesPriority = priorityFilter === "All priorities" || String(ticket.priority) === priorityFilter;
-    return matchesQuery && matchesStatus && matchesPriority;
-  }), [tickets, query, statusFilter, priorityFilter]);
-  const activeFilterCount = (query.trim() ? 1 : 0) + (statusFilter !== "All tickets" ? 1 : 0) + (priorityFilter !== "All priorities" ? 1 : 0);
   function renderTicketColumn(ticket: Ticket, column: TicketListColumn) {
     if (column === "title") return <div className="ticket-cell"><strong>#{ticket.id} {ticket.requester_vip ? "★ " : ""}{ticket.flagged ? "⚑ " : ""}{ticket.requester_active === false ? "⚠ " : ""}{ticket.title}</strong><span>{ticket.description.slice(0, 62)}{ticket.description.length > 62 ? "…" : ""}</span></div>;
     if (column === "id") return `#${ticket.id}`;
-    if (column === "status") return <span className={`status status-${ticket.status.toLowerCase()}`}><i />{statusLabels[ticket.status] ?? ticket.status}</span>;
+    if (column === "status") return <span className={`status status-${ticket.status.toLowerCase()}`}><i />{ticket.status_label ?? statusLabels[ticket.status] ?? ticket.status}</span>;
     if (column === "priority") return <span className={`priority priority-${ticket.priority}`}>{ticket.priority_label ?? `Priority ${ticket.priority}`}{!requesterAccess && <b>{ticket.priority}</b>}</span>;
     if (column === "opened_at") return new Date(ticket.opened_at).toLocaleDateString();
     if (column === "requester_name") return ticket.requester_name ?? "—";
@@ -549,9 +620,9 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   }
   function clearFilters() {
     setQuery("");
-    setStatusFilter("All tickets");
-    setPriorityFilter("All priorities");
-    setFilterOpen(false);
+    setFilters(emptyFilters);
+    setListPage(1);
+    setActiveListProfileId("");
     setMoreOpen(false);
   }
   const openCount = tickets.filter((ticket) => !["SOLVED", "CLOSED"].includes(ticket.status)).length;
@@ -599,25 +670,26 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
           </div>}
           <div className="team-counts" aria-label="Team ticket counts">{teamCounts.map((team) => <span className="team-count" key={team.team_id ?? "unassigned"}>Team {team.team_id ?? "Unassigned"} <b>{team.count}</b></span>)}</div>
           <div className="table-toolbar">
-            <div className="search-box"><Icon name="search" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tickets by ID, title, or keyword" /></div>
+            <div className="search-box"><Icon name="search" /><input value={query} aria-label="Search tickets" onChange={(event) => { setQuery(event.target.value); setListPage(1); }} placeholder="Search tickets by ID, title, or keyword" /></div>
             <div className="toolbar-actions">
-              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filter tickets"><option>All tickets</option><option>NEW</option><option>ASSIGNED</option><option>PENDING</option><option>SOLVED</option><option>CLOSED</option></select>
               <div className="toolbar-menu-wrap">
-                <button className={`filter-button ${filterOpen ? "button-active" : ""}`} onClick={() => { setFilterOpen((open) => !open); setMoreOpen(false); }}>Filter <span>{activeFilterCount}</span></button>
-                {filterOpen && <div className="filter-popover">
-                  <label>Priority<select value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}>
-                    <option>All priorities</option>
-                    {priorityOptions.map(({ value, label }) => <option key={value} value={value}>{requesterAccess ? label : `${label} (${value})`}</option>)}
-                  </select></label>
-                  <button className="clear-button" onClick={clearFilters}>Clear filters</button>
-                </div>}
-              </div>
-              <div className="toolbar-menu-wrap">
-                <button className="more-button" aria-label="More ticket actions" aria-expanded={moreOpen} onClick={() => { setMoreOpen((open) => !open); setFilterOpen(false); }}>•••</button>
+                <button className="more-button" aria-label="More ticket actions" aria-expanded={moreOpen} onClick={() => setMoreOpen((open) => !open)}>•••</button>
                 {moreOpen && <div className="more-popover" role="menu"><button role="menuitem" onClick={() => { setMoreOpen(false); void loadTickets(); }}>Refresh tickets</button><button role="menuitem" onClick={clearFilters}>Clear all filters</button></div>}
               </div>
             </div>
           </div>
+          <FilterBar
+            filters={activeFilters}
+            options={filterOptions}
+            optionsError={filterOptionsError}
+            staff={!requesterAccess}
+            search={query}
+            total={listTotal}
+            loading={listLoading}
+            onChange={changeFilters}
+            onClearSearch={() => { setQuery(""); setListPage(1); }}
+            onClearAll={clearFilters}
+          />
           <div className="list-controls"><label>Sort<select value={listSort} onChange={(event) => { setListSort(event.target.value); setListPage(1); }}><option value="opened_at">Opened</option><option value="priority">Priority</option><option value="status">Status</option><option value="title">Title</option></select></label><button className="sort-toggle" onClick={() => setListDirection((current) => current === "asc" ? "desc" : "asc")}>{listDirection === "asc" ? "Ascending" : "Descending"}</button><label>Page size<select value={listPageSize} onChange={(event) => { setListPageSize(Number(event.target.value)); setListPage(1); }}><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label></div>
           <div className="profile-control-panel" aria-label="Saved ticket profiles">
             <label>Saved profile<select value={activeListProfileId} onChange={(event) => applyListProfile(listProfiles.find((profile) => String(profile.id) === event.target.value))}><option value="">Current view</option>{listProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.kind === "filter" ? "Filter" : "Columns"} · {profile.name}{profile.is_default ? " (default)" : ""}</option>)}</select></label>
@@ -629,8 +701,8 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
           {assignmentMessage && <p className="success-message" role="status">{assignmentMessage}</p>}
           <div className="profile-column-chooser"><strong>Choose columns</strong>{ticketListColumns.map(({ key, label }) => <label key={key}><input type="checkbox" checked={listColumns.includes(key)} onChange={(event) => setListColumns((columns) => event.target.checked ? [...columns, key] : columns.length > 1 ? columns.filter((column) => column !== key) : columns)} />{label}</label>)}</div>
           {error && <p className="error" role="alert">{error}</p>}
-          <div className="table-meta"><span><strong>{listTotal}</strong> tickets</span><button className="clear-button" onClick={clearFilters}>Clear filters</button></div>
-          <div className="ticket-table-wrap"><table><thead><tr><th className="check-col"><input type="checkbox" aria-label="Select all tickets" /></th>{listColumns.map((column) => <th key={column}>{ticketListColumns.find((item) => item.key === column)?.label ?? column}</th>)}<th /></tr></thead><tbody>{filteredTickets.map((ticket) => <tr key={ticket.id} className={selected?.id === ticket.id ? "row-selected" : ""} onClick={() => void selectTicket(ticket)}><td className="check-col" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ticket ${ticket.id}`} /></td>{listColumns.map((column) => <td key={column}>{renderTicketColumn(ticket, column)}</td>)}<td>{queueAccess && canSelfClaim && !ticket.assignee_id && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void claimTicket(ticket); }}>Claim</button>}{canAssignTickets && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void selectTicket(ticket); setAssignmentPickerTicketId(ticket.id); }}>Assign</button>}<button className="row-menu" onClick={(event) => event.stopPropagation()}>•••</button></td></tr>)}</tbody></table>{!filteredTickets.length && <div className="empty-table"><strong>{queueAccess ? "No tickets in this queue" : "No tickets found"}</strong><span>{queueAccess ? "Try another queue or refresh the list." : "Try changing your search or filters."}</span></div>}</div>
+          <div className="table-meta"><span><strong>{listTotal}</strong> tickets</span></div>
+          <div className="ticket-table-wrap"><table><thead><tr><th className="check-col"><input type="checkbox" aria-label="Select all tickets" /></th>{listColumns.map((column) => <th key={column}>{ticketListColumns.find((item) => item.key === column)?.label ?? column}</th>)}<th /></tr></thead><tbody>{tickets.map((ticket) => <tr key={ticket.id} className={selected?.id === ticket.id ? "row-selected" : ""} onClick={() => void selectTicket(ticket)}><td className="check-col" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ticket ${ticket.id}`} /></td>{listColumns.map((column) => <td key={column}>{renderTicketColumn(ticket, column)}</td>)}<td>{queueAccess && canSelfClaim && !ticket.assignee_id && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void claimTicket(ticket); }}>Claim</button>}{canAssignTickets && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void selectTicket(ticket); setAssignmentPickerTicketId(ticket.id); }}>Assign</button>}<button className="row-menu" onClick={(event) => event.stopPropagation()}>•••</button></td></tr>)}</tbody></table>{!tickets.length && !listLoading && <div className="empty-table"><strong>{queueAccess ? "No tickets in this queue" : "No tickets found"}</strong><span>{error ? "The list could not be loaded. Adjust the filters and try again." : "No tickets match the current filters. Remove a filter or use Clear all."}</span></div>}{listLoading && !tickets.length && <div className="empty-table" role="status"><strong>Loading tickets…</strong></div>}</div>
           <div className="pagination-controls"><button disabled={listPage <= 1} onClick={() => setListPage((page) => page - 1)}>Previous</button><span>Page {listPage}</span><button disabled={listPage * listPageSize >= listTotal} onClick={() => setListPage((page) => page + 1)}>Next</button></div>
         </section>
         </>}
@@ -653,7 +725,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         onAssigned={onTicketAssigned}
       /> : null;
     })()}
-    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{statusLabels[selected.status] ?? selected.status}</span>{queueAccess && canSelfClaim && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}{canAssignTickets && <button className="primary-button assign-primary" onClick={() => setAssignmentPickerTicketId(selected.id)}>Assign</button>}</div><div className="assignment-summary"><span>Raised by: <strong>{selected.requester_name ?? "Unknown"}</strong></span><span>Assigned to: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Type: <strong>{ticketTypes.find((item) => item.id === selected.ticket_type_id)?.name ?? "—"}</strong></span><span>Created: <strong>{new Date(selected.opened_at).toLocaleString()}</strong></span><span>Priority: <strong>{selected.priority_label ?? `Priority ${selected.priority}`}{requesterAccess ? "" : ` (${selected.priority})`}</strong></span>{!requesterAccess && <span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span>}</div><div className="drawer-tabs"><button className="tab active">Activity</button><button className="tab">Details</button></div><div className="drawer-content"><section className="drawer-section"><h3>Description</h3><SafeHtml className="ticket-description" html={selected.description} /></section><TicketAttachments ticketId={selected.id} headers={apiHeaders} /><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><ReplyComposer ticketId={selected.id} headers={apiHeaders} onSent={() => selectTicket(selected)} /><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>{selected.requester_name ?? "Unknown"}</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div>{!requesterAccess && <div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div>}</dl></section></div></aside>}
+    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{selected.status_label ?? statusLabels[selected.status] ?? selected.status}</span>{queueAccess && canSelfClaim && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}{canAssignTickets && <button className="primary-button assign-primary" onClick={() => setAssignmentPickerTicketId(selected.id)}>Assign</button>}</div><div className="assignment-summary"><span>Raised by: <strong>{selected.requester_name ?? "Unknown"}</strong></span><span>Assigned to: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Type: <strong>{ticketTypes.find((item) => item.id === selected.ticket_type_id)?.name ?? "—"}</strong></span><span>Created: <strong>{new Date(selected.opened_at).toLocaleString()}</strong></span><span>Priority: <strong>{selected.priority_label ?? `Priority ${selected.priority}`}{requesterAccess ? "" : ` (${selected.priority})`}</strong></span>{!requesterAccess && <span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span>}</div><div className="drawer-tabs"><button className="tab active">Activity</button><button className="tab">Details</button></div><div className="drawer-content"><section className="drawer-section"><h3>Description</h3><SafeHtml className="ticket-description" html={selected.description} /></section><TicketAttachments ticketId={selected.id} headers={apiHeaders} /><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><ReplyComposer ticketId={selected.id} headers={apiHeaders} onSent={() => selectTicket(selected)} /><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>{selected.requester_name ?? "Unknown"}</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div>{!requesterAccess && <div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div>}</dl></section></div></aside>}
     {showCreate && (
       <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreate(); }}>
         <form
@@ -747,7 +819,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
 
 function OverviewPanel({ tickets, openCount, resolvedCount, highPriorityCount }: { tickets: Ticket[]; openCount: number; resolvedCount: number; highPriorityCount: number }) {
   const statusCounts = tickets.reduce<Record<string, number>>((counts, ticket) => ({ ...counts, [ticket.status]: (counts[ticket.status] ?? 0) + 1 }), {});
-  return <section className="section-panel"><div className="page-heading"><div><p className="kicker">SERVICE OPERATIONS</p><h1>Workspace overview</h1><p className="subheading">Monitor service health and the work requiring attention.</p></div></div><div className="metric-row"><div className="metric"><span className="metric-label">Open tickets</span><strong>{openCount}</strong><small>Needs attention</small></div><div className="metric"><span className="metric-label">Resolved tickets</span><strong>{resolvedCount}</strong><small>Current workspace</small></div><div className="metric"><span className="metric-label">High priority</span><strong>{highPriorityCount}</strong><small>Priority 1 or 2</small></div><div className="metric"><span className="metric-label">Total requests</span><strong>{tickets.length}</strong><small>All visible tickets</small></div></div><div className="panel-grid"><section className="table-card panel-card"><div className="panel-card-heading"><h2>Ticket status</h2><span>Live queue</span></div>{Object.entries(statusCounts).map(([status, count]) => <div className="bar-row" key={status}><span>{statusLabels[status] ?? status}</span><b><i style={{ width: `${tickets.length ? Math.max(8, (count / tickets.length) * 100) : 0}%` }} /></b><strong>{count}</strong></div>)}</section><section className="table-card panel-card"><div className="panel-card-heading"><h2>Recent activity</h2><span>Latest requests</span></div>{tickets.slice(0, 5).map((ticket) => <div className="activity-row" key={ticket.id}><span className={`status status-${ticket.status.toLowerCase()}`}><i />#{ticket.id}</span><strong>{ticket.title}</strong><small>{statusLabels[ticket.status] ?? ticket.status}</small></div>)}</section></div></section>;
+  return <section className="section-panel"><div className="page-heading"><div><p className="kicker">SERVICE OPERATIONS</p><h1>Workspace overview</h1><p className="subheading">Monitor service health and the work requiring attention.</p></div></div><div className="metric-row"><div className="metric"><span className="metric-label">Open tickets</span><strong>{openCount}</strong><small>Needs attention</small></div><div className="metric"><span className="metric-label">Resolved tickets</span><strong>{resolvedCount}</strong><small>Current workspace</small></div><div className="metric"><span className="metric-label">High priority</span><strong>{highPriorityCount}</strong><small>Priority 1 or 2</small></div><div className="metric"><span className="metric-label">Total requests</span><strong>{tickets.length}</strong><small>All visible tickets</small></div></div><div className="panel-grid"><section className="table-card panel-card"><div className="panel-card-heading"><h2>Ticket status</h2><span>Live queue</span></div>{Object.entries(statusCounts).map(([status, count]) => <div className="bar-row" key={status}><span>{statusLabels[status] ?? status}</span><b><i style={{ width: `${tickets.length ? Math.max(8, (count / tickets.length) * 100) : 0}%` }} /></b><strong>{count}</strong></div>)}</section><section className="table-card panel-card"><div className="panel-card-heading"><h2>Recent activity</h2><span>Latest requests</span></div>{tickets.slice(0, 5).map((ticket) => <div className="activity-row" key={ticket.id}><span className={`status status-${ticket.status.toLowerCase()}`}><i />#{ticket.id}</span><strong>{ticket.title}</strong><small>{ticket.status_label ?? statusLabels[ticket.status] ?? ticket.status}</small></div>)}</section></div></section>;
 }
 
 function PeoplePanel({ currentUser, requesters, agents }: { currentUser: CurrentUser | null; requesters: Requester[]; agents: Requester[] }) {
