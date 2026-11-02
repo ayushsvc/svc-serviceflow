@@ -1,6 +1,8 @@
 import asyncio
 import os
+import sys
 
+from pydantic import EmailStr, TypeAdapter, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -231,7 +233,29 @@ async def seed_ticket_type_field_defaults(db: AsyncSession) -> list[str]:
     return changed
 
 
-async def seed() -> None:
+def _configured_users(*, production: bool) -> list[tuple[str, str, str, str]]:
+    if production:
+        try:
+            email = str(TypeAdapter(EmailStr).validate_python(os.environ["SEED_ADMIN_EMAIL"])).lower()
+        except (KeyError, ValidationError) as exc:
+            raise RuntimeError("SEED_ADMIN_EMAIL must be a valid administrator email") from exc
+        name = os.environ.get("SEED_ADMIN_NAME", "").strip()
+        password = os.environ.get("SEED_ADMIN_PASSWORD", "")
+        if not name or len(name) > 160:
+            raise RuntimeError("SEED_ADMIN_NAME must contain 1 to 160 characters")
+        if len(password) < 16 or len(password.encode("utf-8")) > 72:
+            raise RuntimeError("SEED_ADMIN_PASSWORD must contain at least 16 and at most 72 UTF-8 bytes")
+        return [(email, name, "Administrator", password)]
+
+    return [
+        ("admin@svcinfosys.in", "SVC Administrator", "Administrator", os.environ["SEED_ADMIN_PASSWORD"]),
+        ("aarav@svcinfosys.in", "Aarav Sharma", "Technician", os.environ["SEED_TECHNICIAN_PASSWORD"]),
+        ("priya@svcinfosys.in", "Priya Nair", "Requester", os.environ["SEED_REQUESTER_PASSWORD"]),
+    ]
+
+
+async def seed(*, production: bool = False) -> None:
+    users = _configured_users(production=production)
     async with SessionLocal() as db:
         entity = await db.scalar(select(Entity).where(Entity.name == "SVC Infosystems"))
         if entity is None:
@@ -252,11 +276,6 @@ async def seed() -> None:
             profiles[name] = profile
         updated_profile_rights = await seed_profile_rights(profiles)
         updated_form_fields = await seed_ticket_type_field_defaults(db)
-        users = [
-            ("admin@svcinfosys.in", "SVC Administrator", "Administrator", os.environ["SEED_ADMIN_PASSWORD"]),
-            ("aarav@svcinfosys.in", "Aarav Sharma", "Technician", os.environ["SEED_TECHNICIAN_PASSWORD"]),
-            ("priya@svcinfosys.in", "Priya Nair", "Requester", os.environ["SEED_REQUESTER_PASSWORD"]),
-        ]
         for email, name, profile_name, password in users:
             existing = await db.scalar(select(User).where(User.email == email))
             if existing is None:
@@ -268,18 +287,19 @@ async def seed() -> None:
                 Group.name == f"{entity.name} Service Desk",
             )
         )
-        technicians = await db.scalars(
-            select(User).where(
-                User.entity_id == entity.id,
-                User.profile_id == profiles["Technician"].id,
-                User.is_active.is_(True),
+        if not production:
+            technicians = await db.scalars(
+                select(User).where(
+                    User.entity_id == entity.id,
+                    User.profile_id == profiles["Technician"].id,
+                    User.is_active.is_(True),
+                )
             )
-        )
-        if service_desk is not None:
-            for technician in technicians:
-                membership = await db.get(GroupMember, (service_desk.id, technician.id))
-                if membership is None:
-                    db.add(GroupMember(group_id=service_desk.id, user_id=technician.id))
+            if service_desk is not None:
+                for technician in technicians:
+                    membership = await db.get(GroupMember, (service_desk.id, technician.id))
+                    if membership is None:
+                        db.add(GroupMember(group_id=service_desk.id, user_id=technician.id))
         await db.commit()
         if updated_profile_rights:
             print("Added seeded profile rights: " + "; ".join(updated_profile_rights))
@@ -288,4 +308,4 @@ async def seed() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(seed())
+    asyncio.run(seed(production="--production" in sys.argv[1:]))

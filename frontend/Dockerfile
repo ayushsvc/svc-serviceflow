@@ -6,6 +6,8 @@ FROM node:22-alpine AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules node_modules
 COPY frontend .
+ARG API_INTERNAL_HOSTPORT=api:8000
+ENV API_INTERNAL_HOSTPORT=${API_INTERNAL_HOSTPORT}
 RUN npm run build
 FROM node:22-alpine
 WORKDIR /app

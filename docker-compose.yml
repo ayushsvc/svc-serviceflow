@@ -7,13 +7,21 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
       JWT_SECRET: ${JWT_SECRET}
-      SMTP_HOST: mailhog
-      SMTP_PORT: 1025
-      MAIL_FROM: no-reply@svcinfosys.in
-      CORS_ORIGINS: http://localhost:3000
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      MAIL_FROM: ${MAIL_FROM:-no-reply@svcinfosys.in}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+      INVITATION_TTL_HOURS: ${INVITATION_TTL_HOURS:-24}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      DEBUG: ${DEBUG:-false}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD}
       SEED_TECHNICIAN_PASSWORD: ${SEED_TECHNICIAN_PASSWORD}
       SEED_REQUESTER_PASSWORD: ${SEED_REQUESTER_PASSWORD}
+    volumes: [svc-uploads:/app/data/documents]
     ports: ["8000:8000"]
     depends_on:
       db: { condition: service_healthy }
@@ -48,9 +56,13 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
       JWT_SECRET: ${JWT_SECRET}
-      SMTP_HOST: mailhog
-      SMTP_PORT: 1025
-      MAIL_FROM: no-reply@svcinfosys.in
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      MAIL_FROM: ${MAIL_FROM:-no-reply@svcinfosys.in}
     depends_on: [db, redis]
     command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
   beat:
@@ -61,9 +73,13 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
       JWT_SECRET: ${JWT_SECRET}
-      SMTP_HOST: mailhog
-      SMTP_PORT: 1025
-      MAIL_FROM: no-reply@svcinfosys.in
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      MAIL_FROM: ${MAIL_FROM:-no-reply@svcinfosys.in}
     depends_on: [db, redis]
     command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
   mailhog:
@@ -72,3 +88,4 @@ services:
 volumes:
   svc-postgres:
   svc-redis:
+  svc-uploads:

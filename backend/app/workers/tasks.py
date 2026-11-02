@@ -1,5 +1,4 @@
 import asyncio
-import smtplib
 from datetime import UTC, datetime
 from email.message import EmailMessage
 
@@ -13,6 +12,7 @@ from app.core.config import get_settings
 from app.demo_data import DEMO_TITLES
 from app.models import AuditLog, NotificationTemplate, RecurringTicket, Ticket, User
 from app.services.content import sanitize_rich_text
+from app.services.email import send_email
 from app.services.tickets import calculate_priority, priority_label
 from app.workers.celery_app import celery_app
 
@@ -126,8 +126,7 @@ async def _send_ticket_notification(ticket_id: int, event: str) -> None:
         message["To"] = recipient.email
         message["Subject"] = Template(template.subject).render(**context)
         message.set_content(Template(template.body_jinja).render(**context))
-        with smtplib.SMTP(get_settings().smtp_host, get_settings().smtp_port, timeout=10) as smtp:
-            smtp.send_message(message)
+        send_email(message)
 
 
 async def _send_user_ticket_notification(ticket_id: int, user_id: int, event: str) -> None:
@@ -162,5 +161,4 @@ async def _send_user_ticket_notification(ticket_id: int, user_id: int, event: st
         message["To"] = recipient.email
         message["Subject"] = Template(template.subject).render(**context)
         message.set_content(Template(template.body_jinja).render(**context))
-        with smtplib.SMTP(get_settings().smtp_host, get_settings().smtp_port, timeout=10) as smtp:
-            smtp.send_message(message)
+        send_email(message)
