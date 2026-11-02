@@ -12,6 +12,14 @@ import AttachmentDropzone from "./components/AttachmentDropzone";
 import ReplyComposer from "./components/ReplyComposer";
 import { SafeHtml } from "./components/SafeHtml";
 import { TicketAttachments } from "./components/TicketAttachments";
+import { Popover } from "./components/Popover";
+import ProfileMenu from "./components/ProfileMenu";
+import SidebarNav, { NavEntry } from "./components/SidebarNav";
+import { DrawerTab, DrawerTabs, TabPanel } from "./components/DrawerTabs";
+import TicketActionsMenu from "./components/TicketActionsMenu";
+import TicketDetailsTab from "./components/TicketDetailsTab";
+import { ToastRegion, useToast } from "./components/Toast";
+import NotificationBell from "./components/NotificationBell";
 import { AttachmentItem, revokePreview, unsentCount, uploadItems } from "./lib/attachments";
 
 type TokenPair = { access_token: string; refresh_token: string };
@@ -55,7 +63,7 @@ type Ticket = {
   flagged?: boolean;
 };
 type TimelineItem = { kind: string; body: string; created_at: string; state?: string; is_private?: boolean };
-type CurrentUser = { id: number; name: string; email: string; profile: { name: string; interface: string; rights?: Record<string, boolean> } };
+type CurrentUser = { id: number; name: string; email: string; entity_id?: number; entity?: { id: number; name: string } | null; profile: { name: string; interface: string; rights?: Record<string, boolean> } };
 type Requester = { id: number; name: string; email: string };
 type Category = { id: number; name: string };
 type Group = { id: number; name: string };
@@ -112,7 +120,22 @@ export default function Home() {
     setToken((await response.json()) as TokenPair);
   }
 
-  if (token) return <TicketWorkspace token={token} onSignOut={() => { Object.keys(window.localStorage).filter((key) => key.startsWith("svc-ticket-draft:")).forEach((key) => window.localStorage.removeItem(key)); setToken(null); }} />;
+  async function signOut() {
+    if (token) {
+      // Revoke the refresh token server-side; local sign-out proceeds even if the call fails.
+      await fetch("/api/v1/auth/logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token.access_token}` },
+        body: JSON.stringify({ refresh_token: token.refresh_token }),
+      }).catch(() => undefined);
+    }
+    Object.keys(window.localStorage).filter((key) => key.startsWith("svc-ticket-draft:")).forEach((key) => window.localStorage.removeItem(key));
+    window.history.replaceState(null, "", window.location.pathname);
+    setPassword("");
+    setToken(null);
+  }
+
+  if (token) return <TicketWorkspace token={token} onSignOut={signOut} />;
 
   return (
     <main className="login-page">
@@ -158,7 +181,7 @@ function DynamicFields({ schema, values, onChange, portal }: { schema: FormSchem
   })}</div>;
 }
 
-function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: () => void }) {
+function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: () => Promise<void> | void }) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [selected, setSelected] = useState<Ticket | null>(null);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
@@ -174,7 +197,6 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   const queueDefaulted = useRef(false);
   const loadSeq = useRef(0);
   const [priorityOptions, setPriorityOptions] = useState<PriorityOption[]>([]);
-  const [moreOpen, setMoreOpen] = useState(false);
   const [activeNav, setActiveNav] = useState("Tickets");
   const [showDrawer, setShowDrawer] = useState(true);
   const [error, setError] = useState("");
@@ -187,7 +209,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   const [assignmentPickerTicketId, setAssignmentPickerTicketId] = useState<number | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
-  const [ticketType, setTicketType] = useState("INCIDENT");
+  const [ticketType, setTicketType] = useState("");
   const [ticketTypes, setTicketTypes] = useState<TicketType[]>([]);
   const [formSchema, setFormSchema] = useState<FormSchema | null>(null);
   const [assignmentPreview, setAssignmentPreview] = useState<AssignmentPreview | null>(null);
@@ -204,8 +226,11 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   const [attachmentItems, setAttachmentItems] = useState<AttachmentItem[]>([]);
   const [createdTicket, setCreatedTicket] = useState<Ticket | null>(null);
   const [createError, setCreateError] = useState("");
-  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [drawerTab, setDrawerTab] = useState<DrawerTab>("activity");
+  const [peopleView, setPeopleView] = useState<"all" | "technicians" | "requesters">("all");
+  const { toast, show: showToast, dismiss: dismissToast } = useToast();
+  const hamburgerRef = useRef<HTMLButtonElement>(null);
   const [listPage, setListPage] = useState(1);
   const [listPageSize, setListPageSize] = useState(25);
   const [listTotal, setListTotal] = useState(0);
@@ -232,6 +257,13 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     || currentUser?.profile.rights?.["ticket:assign"]
     || currentUser?.profile.rights?.["*"],
   );
+  const canUpdateTickets = Boolean(
+    currentUser?.profile.rights?.["ticket:edit"]
+    || currentUser?.profile.rights?.["ticket:update"]
+    || currentUser?.profile.rights?.["tickets:update"]
+    || currentUser?.profile.rights?.["ticket:bulk_edit"]
+    || currentUser?.profile.rights?.["*"],
+  );
   // Administration visibility follows the '*' right; backend require_admin still checks the profile name (to be replaced by a named admin right in the roles/permissions step).
   const canAccessAdministration = currentUser?.profile.rights?.["*"] === true;
   const requesterAccess = Boolean(currentUser?.profile.rights?.["ticket:own_only"]);
@@ -245,6 +277,59 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   }
 
   const apiHeaders = { Authorization: `Bearer ${token.access_token}` };
+  const apiAuthorization = apiHeaders.Authorization;
+  const entityName = currentUser?.entity?.name ?? "";
+  useEffect(() => {
+    if (!mobileNavOpen) return undefined;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { setMobileNavOpen(false); hamburgerRef.current?.focus(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [mobileNavOpen]);
+  useEffect(() => {
+    // Deep link: ?ticket=ID opens that ticket once the user is known.
+    if (!currentUser) return;
+    const id = Number(new URLSearchParams(window.location.search).get("ticket"));
+    if (!Number.isInteger(id) || id <= 0) return;
+    void fetch(`/api/v1/tickets/${id}`, { headers: apiHeaders }).then(async (response) => {
+      if (response.ok) { await selectTicket((await response.json()) as Ticket); }
+      else showToast("error", "That ticket is not available to you.");
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.id]);
+  function navigateTo(label: string) {
+    setActiveNav(label);
+    setMobileNavOpen(false);
+  }
+  const navItems: NavEntry[] = [
+    {
+      icon: "ticket", label: "Tickets", badge: tickets.filter((ticket) => !["SOLVED", "CLOSED"].includes(ticket.status)).length,
+      children: tabsAccess ? ((viewAllAccess ? [
+        ["unassigned", "Unassigned"],
+        ["all", "All tickets"],
+      ] : [
+        ["all", "All visible"],
+        ["mine", "My tickets"],
+        ["teams", "My teams"],
+        ...(canViewUnassigned ? [["unassigned", "Unassigned"]] : []),
+      ]) as Array<[("all" | "mine" | "teams" | "unassigned"), string]>).map(([key, label]) => ({
+        key, label, count: queueCounts[key], active: queueFilter === key,
+        onSelect: () => { setQueueFilter(key); setListPage(1); },
+      })) : undefined,
+    },
+    { icon: "grid", label: "Overview" },
+    {
+      icon: "users", label: "People",
+      children: currentUser?.profile.interface === "helpdesk" ? [
+        { key: "technicians", label: "Technicians", count: agents.length, active: peopleView === "technicians", onSelect: () => setPeopleView("technicians") },
+        { key: "requesters", label: "Requesters", active: peopleView === "requesters", onSelect: () => setPeopleView("requesters") },
+      ] : undefined,
+    },
+    { icon: "book", label: "Knowledge base" },
+    { icon: "chart", label: "Reports" },
+    ...(currentUser?.profile.interface === "helpdesk" ? [{ icon: "ticket", label: "Approvals" }, ...(currentUser.profile.name === "Administrator" ? [{ icon: "settings", label: "Workflows" }] : [])] : []),
+  ];
   function listErrorMessage(status: number) {
     if (status === 422) return "Some filter values are not valid. Check the date range and selected options, then try again.";
     if (status === 403) return "You do not have access to one or more of the selected filters.";
@@ -347,6 +432,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
 
   async function selectTicket(ticket: Ticket) {
     setSelected(ticket);
+    if (selected?.id !== ticket.id) setDrawerTab("activity");
     setAssignmentMessage("");
     setShowDrawer(true);
     const [detailResponse, timelineResponse] = await Promise.all([
@@ -476,19 +562,23 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
       });
   }, [currentUser]);
   useEffect(() => {
-    if (!ticketType) return;
+    // Wait for the numeric id resolved from the ticket types list; the endpoint rejects anything else with 422.
+    if (!/^\d+$/.test(ticketType)) { setFormSchema(null); return; }
+    let cancelled = false;
     void fetch(`/api/v1/ticket-types/${ticketType}/form`, { headers: apiHeaders })
       .then((response) => response.ok ? response.json() : null)
       .then((schema: FormSchema | null) => {
+        if (cancelled) return;
         setFormSchema(schema);
         if (schema) {
           const defaults = Object.fromEntries(Object.values(schema.pages).flat().filter((field) => field.default_value !== null).map((field) => [field.key, field.default_value]));
           setCustomFields((current) => ({ ...defaults, ...current }));
         }
       });
+    return () => { cancelled = true; };
   }, [ticketType]);
   useEffect(() => {
-    if (!ticketType || !showCreate) return;
+    if (!/^\d+$/.test(ticketType) || !showCreate) return;
     const params = new URLSearchParams({ ticket_type_id: ticketType, urgency, impact });
     void fetch(`/api/v1/tickets/assignment-preview?${params.toString()}`, { headers: apiHeaders })
       .then((response) => response.ok ? response.json() : null)
@@ -503,7 +593,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
           if (!draft.savedAt || Date.now() - draft.savedAt > 7 * 24 * 60 * 60 * 1000) {
             window.localStorage.removeItem(draftKey!);
           } else {
-            setNewTitle(draft.title ?? ""); setNewDescription(draft.description ?? ""); setTicketType(draft.type ?? ticketType); setCustomFields(draft.fields ?? {});
+            setNewTitle(draft.title ?? ""); setNewDescription(draft.description ?? ""); setTicketType(/^\d+$/.test(draft.type ?? "") ? String(draft.type) : ticketType); setCustomFields(draft.fields ?? {});
             setDraftSaved(true);
           }
         } catch { window.localStorage.removeItem(draftKey!); }
@@ -623,37 +713,37 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     setFilters(emptyFilters);
     setListPage(1);
     setActiveListProfileId("");
-    setMoreOpen(false);
   }
   const openCount = tickets.filter((ticket) => !["SOLVED", "CLOSED"].includes(ticket.status)).length;
   const resolvedCount = tickets.filter((ticket) => ["SOLVED", "CLOSED"].includes(ticket.status)).length;
   const highPriorityCount = tickets.filter((ticket) => ticket.priority <= 2).length;
 
   return <div className="app-shell">
-    {mobileNavOpen && <button className="mobile-nav-overlay" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
-    <aside className={`sidebar ${mobileNavOpen ? "sidebar-mobile-open" : ""}`}>
+    {mobileNavOpen && <button className="mobile-nav-overlay" aria-label="Close navigation" onClick={() => { setMobileNavOpen(false); hamburgerRef.current?.focus(); }} />}
+    <aside id="app-sidebar" className={`sidebar ${mobileNavOpen ? "sidebar-mobile-open" : ""}`}>
       <div className="sidebar-logo"><img src="/svc-logo.png" alt="SVC Infosystems" /><span>SVC ServiceFlow</span></div>
-      <div className="workspace-switcher-wrap">
-        <button className="workspace-switcher" onClick={() => setWorkspaceMenuOpen((open) => !open)} aria-expanded={workspaceMenuOpen} aria-haspopup="menu">
-          <span className="avatar avatar-indigo">SI</span><span className="workspace-name">Service desk <small>{currentUser?.profile.name ?? "Operations"}</small></span><span className={`chevron ${workspaceMenuOpen ? "chevron-open" : ""}`}>⌄</span>
-        </button>
-        {workspaceMenuOpen && <div className="workspace-menu" role="menu">
+      <Popover
+        wrapClassName="workspace-switcher-wrap"
+        triggerClassName="workspace-switcher"
+        panelClassName="workspace-menu"
+        ariaLabel="Workspace menu"
+        label={(open) => <><span className="avatar avatar-indigo">SI</span><span className="workspace-name">Service desk <small>{currentUser?.profile.name ?? "Operations"}</small></span><span className={`chevron ${open ? "chevron-open" : ""}`}>⌄</span></>}
+      >
+        {({ close }) => <>
           <div className="workspace-menu-heading"><span className="avatar avatar-indigo">SI</span><span><strong>Service desk</strong><small>{currentUser?.email ?? "Operations workspace"}</small></span><span className="menu-check">✓</span></div>
           <div className="workspace-menu-divider" />
-          <button role="menuitem" onClick={() => { setActiveNav("Overview"); setWorkspaceMenuOpen(false); }}><Icon name="grid" /><span>Workspace overview</span></button>
-          {canAccessAdministration && <button role="menuitem" onClick={() => { setActiveNav("Settings"); setWorkspaceMenuOpen(false); }}><Icon name="settings" /><span>Administration</span></button>}
-          <button role="menuitem" onClick={() => { setWorkspaceMenuOpen(false); onSignOut(); }}><span className="menu-signout">↗</span><span>Sign out</span></button>
-        </div>}
-      </div>
-      <nav className="nav-list" aria-label="Main navigation">
-        {[["grid", "Overview"], ["ticket", "Tickets"], ["users", "People"], ["book", "Knowledge base"], ["chart", "Reports"], ...(currentUser?.profile.interface === "helpdesk" ? [["ticket", "Approvals"], ...(currentUser.profile.name === "Administrator" ? [["settings", "Workflows"]] : [])] : [])].map(([icon, label]) => <button className={`nav-item ${activeNav === label ? "active" : ""}`} key={label} onClick={() => setActiveNav(label)}><Icon name={icon} /><span>{label}</span>{label === "Tickets" && <b>{openCount}</b>}</button>)}
-      </nav>
-      <div className="sidebar-bottom"><button className={`nav-item ${activeNav === "Settings" ? "active" : ""}`} onClick={() => setActiveNav("Settings")}><Icon name="settings" /><span>Settings</span></button><div className="user-card"><span className="avatar avatar-slate">{currentUser?.name.slice(0, 2).toUpperCase() ?? "AD"}</span><span><strong>{currentUser?.name ?? "Admin"}</strong><small>{currentUser?.profile.name ?? "Administrator"}</small></span><button aria-label="Sign out" onClick={onSignOut}>↗</button></div></div>
+          <button type="button" role="menuitem" onClick={() => { close(); navigateTo("Overview"); }}><Icon name="grid" /><span>Workspace overview</span></button>
+          {canAccessAdministration && <button type="button" role="menuitem" onClick={() => { close(); navigateTo("Settings"); }}><Icon name="settings" /><span>Administration</span></button>}
+          <button type="button" role="menuitem" onClick={() => { close(); void onSignOut(); }}><span className="menu-signout">↗</span><span>Sign out</span></button>
+        </>}
+      </Popover>
+      <SidebarNav items={navItems} activeNav={activeNav} renderIcon={(name) => <Icon name={name} />} onNavigate={navigateTo} />
+      <div className="sidebar-bottom"><button className={`nav-item ${activeNav === "Settings" ? "active" : ""}`} onClick={() => navigateTo("Settings")}><Icon name="settings" /><span>Settings</span></button><div className="user-card"><span className="avatar avatar-slate">{currentUser?.name.slice(0, 2).toUpperCase() ?? "AD"}</span><span><strong>{currentUser?.name ?? "Admin"}</strong><small>{currentUser?.profile.name ?? "Administrator"}</small></span><button aria-label="Sign out" onClick={() => void onSignOut()}>↗</button></div></div>
     </aside>
     <main className="main-canvas">
-      <header className="topbar"><div className="topbar-leading"><button className="mobile-menu-button icon-button" aria-label="Open navigation" onClick={() => setMobileNavOpen(true)}><span /><span /><span /></button><div className="breadcrumb">Workspace <span>/</span> <strong>{activeNav}</strong></div></div><div className="topbar-actions"><button aria-label="Notifications" className="icon-button"><Icon name="bell" /><i /></button><button className="avatar avatar-indigo top-avatar">AD</button></div></header>
+      <header className="topbar"><div className="topbar-leading"><button ref={hamburgerRef} className="mobile-menu-button icon-button" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} aria-controls="app-sidebar" onClick={() => setMobileNavOpen((open) => !open)}><span /><span /><span /></button><div className="breadcrumb">Workspace <span>/</span> <strong>{activeNav}</strong></div></div><div className="topbar-actions"><NotificationBell authorization={apiAuthorization} userId={currentUser?.id} onOpenTicket={(id) => { setActiveNav("Tickets"); void fetch(`/api/v1/tickets/${id}`, { headers: apiHeaders }).then(async (response) => { if (response.ok) await selectTicket((await response.json()) as Ticket); else showToast("error", "That ticket is no longer available to you."); }); }} /><ProfileMenu user={currentUser} authorization={apiAuthorization} onSignOut={onSignOut} /></div></header>
       <div className="page-content">
-        {activeNav === "Settings" ? <SettingsPanel currentUser={currentUser} adminToken={token} /> : activeNav === "Workflows" ? <WorkflowPanel token={token} /> : activeNav === "Approvals" ? <ApprovalsPanel token={token} currentUser={currentUser} /> : activeNav === "Overview" ? <OverviewPanel tickets={tickets} openCount={openCount} resolvedCount={resolvedCount} highPriorityCount={highPriorityCount} /> : activeNav === "People" ? <PeoplePanel currentUser={currentUser} requesters={requesters} agents={agents} /> : activeNav === "Knowledge base" ? <KnowledgePanel categories={categories} /> : activeNav === "Reports" ? <ReportsPanel tickets={tickets} priorityOptions={priorityOptions} requester={requesterAccess} /> : <>
+        {activeNav === "Settings" ? <SettingsPanel currentUser={currentUser} adminToken={token} /> : activeNav === "Workflows" ? <WorkflowPanel token={token} /> : activeNav === "Approvals" ? <ApprovalsPanel token={token} currentUser={currentUser} /> : activeNav === "Overview" ? <OverviewPanel tickets={tickets} openCount={openCount} resolvedCount={resolvedCount} highPriorityCount={highPriorityCount} /> : activeNav === "People" ? <PeoplePanel currentUser={currentUser} requesters={requesters} agents={agents} view={peopleView} /> : activeNav === "Knowledge base" ? <KnowledgePanel categories={categories} /> : activeNav === "Reports" ? <ReportsPanel tickets={tickets} priorityOptions={priorityOptions} requester={requesterAccess} /> : <>
         <div className="page-heading"><div><p className="kicker">SERVICE OPERATIONS</p><h1>{activeNav === "Tickets" ? "Tickets" : activeNav}</h1><p className="subheading">{currentUser?.profile.interface === "self_service" ? "Report an incident or request a service, then track your tickets here." : queueAccess ? "Tickets assigned to you, your teams, or awaiting a technician." : "Manage, prioritize, and resolve requests across your organization."}</p></div><button className="primary-button" onClick={() => setShowCreate(true)}><span>+</span> Create ticket</button></div>
         <div className="metric-row"><div className="metric"><span className="metric-label">Open tickets</span><strong>{openCount}</strong><small className="metric-up">+12% <span>vs last week</span></small></div><div className="metric"><span className="metric-label">Awaiting response</span><strong>{tickets.filter((ticket) => ticket.status === "PENDING").length}</strong><small>Needs attention</small></div><div className="metric"><span className="metric-label">SLA compliance</span><strong>94.2%</strong><small className="metric-up">+2.4% <span>vs last month</span></small></div><div className="metric"><span className="metric-label">Avg. resolution</span><strong>6h 24m</strong><small>Across all tickets</small></div></div>
         <section className="table-card">
@@ -672,10 +762,9 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
           <div className="table-toolbar">
             <div className="search-box"><Icon name="search" /><input value={query} aria-label="Search tickets" onChange={(event) => { setQuery(event.target.value); setListPage(1); }} placeholder="Search tickets by ID, title, or keyword" /></div>
             <div className="toolbar-actions">
-              <div className="toolbar-menu-wrap">
-                <button className="more-button" aria-label="More ticket actions" aria-expanded={moreOpen} onClick={() => setMoreOpen((open) => !open)}>•••</button>
-                {moreOpen && <div className="more-popover" role="menu"><button role="menuitem" onClick={() => { setMoreOpen(false); void loadTickets(); }}>Refresh tickets</button><button role="menuitem" onClick={clearFilters}>Clear all filters</button></div>}
-              </div>
+              <Popover wrapClassName="toolbar-menu-wrap" triggerClassName="more-button" panelClassName="more-popover" ariaLabel="More ticket actions" label="•••">
+                {({ close }) => <><button type="button" role="menuitem" onClick={() => { close(); void loadTickets(); }}>Refresh tickets</button><button type="button" role="menuitem" onClick={() => { close(); clearFilters(); }}>Clear all filters</button></>}
+              </Popover>
             </div>
           </div>
           <FilterBar
@@ -725,7 +814,8 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         onAssigned={onTicketAssigned}
       /> : null;
     })()}
-    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{selected.status_label ?? statusLabels[selected.status] ?? selected.status}</span>{queueAccess && canSelfClaim && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}{canAssignTickets && <button className="primary-button assign-primary" onClick={() => setAssignmentPickerTicketId(selected.id)}>Assign</button>}</div><div className="assignment-summary"><span>Raised by: <strong>{selected.requester_name ?? "Unknown"}</strong></span><span>Assigned to: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Type: <strong>{ticketTypes.find((item) => item.id === selected.ticket_type_id)?.name ?? "—"}</strong></span><span>Created: <strong>{new Date(selected.opened_at).toLocaleString()}</strong></span><span>Priority: <strong>{selected.priority_label ?? `Priority ${selected.priority}`}{requesterAccess ? "" : ` (${selected.priority})`}</strong></span>{!requesterAccess && <span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span>}</div><div className="drawer-tabs"><button className="tab active">Activity</button><button className="tab">Details</button></div><div className="drawer-content"><section className="drawer-section"><h3>Description</h3><SafeHtml className="ticket-description" html={selected.description} /></section><TicketAttachments ticketId={selected.id} headers={apiHeaders} /><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><ReplyComposer ticketId={selected.id} headers={apiHeaders} onSent={() => selectTicket(selected)} /><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>{selected.requester_name ?? "Unknown"}</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div>{!requesterAccess && <div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div>}</dl></section></div></aside>}
+    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{selected.status_label ?? statusLabels[selected.status] ?? selected.status}</span>{queueAccess && canSelfClaim && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}{canAssignTickets && <button className="primary-button assign-primary" onClick={() => setAssignmentPickerTicketId(selected.id)}>{selected.assignee_id ? "Reassign" : "Assign"}</button>}<TicketActionsMenu ticket={selected} authorization={apiAuthorization} canAssign={canAssignTickets} canUpdate={canUpdateTickets} staff={!requesterAccess} priorityOptions={priorityOptions} ticketTypes={ticketTypes} onAssign={() => setAssignmentPickerTicketId(selected.id)} onSuccess={async (message) => { showToast("success", message); await Promise.all([selectTicket(selected), loadTickets()]); }} onError={(message) => showToast("error", message)} /></div><div className="assignment-summary"><span>Raised by: <strong>{selected.requester_name ?? "Unknown"}</strong></span><span>Assigned to: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Type: <strong>{ticketTypes.find((item) => item.id === selected.ticket_type_id)?.name ?? "—"}</strong></span><span>Created: <strong>{new Date(selected.opened_at).toLocaleString()}</strong></span><span>Priority: <strong>{selected.priority_label ?? `Priority ${selected.priority}`}{requesterAccess ? "" : ` (${selected.priority})`}</strong></span>{!requesterAccess && <span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span>}</div><DrawerTabs tab={drawerTab} onChange={setDrawerTab} /><div className="drawer-content"><TabPanel tabId="details" tab={drawerTab}><TicketDetailsTab ticket={selected} authorization={apiAuthorization} staff={!requesterAccess} categories={categories} ticketTypes={ticketTypes} entityName={entityName} /></TabPanel><TabPanel tabId="activity" tab={drawerTab}><section className="drawer-section"><h3>Description</h3><SafeHtml className="ticket-description" html={selected.description} /></section><TicketAttachments ticketId={selected.id} headers={apiHeaders} /><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><ReplyComposer ticketId={selected.id} headers={apiHeaders} onSent={() => selectTicket(selected)} /><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>{selected.requester_name ?? "Unknown"}</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div>{!requesterAccess && <div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div>}</dl></section></TabPanel></div></aside>}
+    <ToastRegion toast={toast} onDismiss={dismissToast} />
     {showCreate && (
       <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreate(); }}>
         <form
@@ -822,8 +912,9 @@ function OverviewPanel({ tickets, openCount, resolvedCount, highPriorityCount }:
   return <section className="section-panel"><div className="page-heading"><div><p className="kicker">SERVICE OPERATIONS</p><h1>Workspace overview</h1><p className="subheading">Monitor service health and the work requiring attention.</p></div></div><div className="metric-row"><div className="metric"><span className="metric-label">Open tickets</span><strong>{openCount}</strong><small>Needs attention</small></div><div className="metric"><span className="metric-label">Resolved tickets</span><strong>{resolvedCount}</strong><small>Current workspace</small></div><div className="metric"><span className="metric-label">High priority</span><strong>{highPriorityCount}</strong><small>Priority 1 or 2</small></div><div className="metric"><span className="metric-label">Total requests</span><strong>{tickets.length}</strong><small>All visible tickets</small></div></div><div className="panel-grid"><section className="table-card panel-card"><div className="panel-card-heading"><h2>Ticket status</h2><span>Live queue</span></div>{Object.entries(statusCounts).map(([status, count]) => <div className="bar-row" key={status}><span>{statusLabels[status] ?? status}</span><b><i style={{ width: `${tickets.length ? Math.max(8, (count / tickets.length) * 100) : 0}%` }} /></b><strong>{count}</strong></div>)}</section><section className="table-card panel-card"><div className="panel-card-heading"><h2>Recent activity</h2><span>Latest requests</span></div>{tickets.slice(0, 5).map((ticket) => <div className="activity-row" key={ticket.id}><span className={`status status-${ticket.status.toLowerCase()}`}><i />#{ticket.id}</span><strong>{ticket.title}</strong><small>{ticket.status_label ?? statusLabels[ticket.status] ?? ticket.status}</small></div>)}</section></div></section>;
 }
 
-function PeoplePanel({ currentUser, requesters, agents }: { currentUser: CurrentUser | null; requesters: Requester[]; agents: Requester[] }) {
-  const people = [...agents, ...requesters.filter((requester) => !agents.some((agent) => agent.id === requester.id))];
+function PeoplePanel({ currentUser, requesters, agents, view }: { currentUser: CurrentUser | null; requesters: Requester[]; agents: Requester[]; view: "all" | "technicians" | "requesters" }) {
+  const everyone = [...agents, ...requesters.filter((requester) => !agents.some((agent) => agent.id === requester.id))];
+  const people = view === "technicians" ? agents : view === "requesters" ? everyone.filter((person) => !agents.some((agent) => agent.id === person.id)) : everyone;
   return <section className="section-panel"><div className="page-heading"><div><p className="kicker">PEOPLE AND TEAMS</p><h1>People</h1><p className="subheading">Manage requesters and service desk participants in your workspace.</p></div></div><div className="table-card people-card">{currentUser?.profile.interface !== "helpdesk" ? <div className="empty-table"><strong>{currentUser?.name}</strong><span>Requester profile and ticket access are managed by your service desk.</span></div> : people.length ? people.map((person) => <div className="person-row" key={person.id}><span className="avatar avatar-indigo">{person.name.slice(0, 2).toUpperCase()}</span><div><strong>{person.name}</strong><small>{person.email}</small></div><span className="person-role">{agents.some((agent) => agent.id === person.id) ? "Technician" : "Requester"}</span></div>) : <div className="empty-table"><strong>No people found</strong><span>Active users in this entity will appear here.</span></div>}</div></section>;
 }
 

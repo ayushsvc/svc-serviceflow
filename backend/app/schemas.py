@@ -14,6 +14,12 @@ class ProfileRead(BaseModel):
     rights: dict
 
 
+class OwnEntity(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+
+
 class UserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -22,6 +28,10 @@ class UserRead(BaseModel):
     entity_id: int
     is_active: bool
     profile: ProfileRead
+
+
+class MeRead(UserRead):
+    entity: OwnEntity | None = None
 
 
 class TokenPair(BaseModel):

@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import attachments, audit, auth, automation, entities, field_engine, tickets, workflows
+from app.api import attachments, audit, auth, automation, entities, field_engine, notifications, tickets, workflows
 from app.core.config import get_settings
 
 
@@ -32,6 +32,7 @@ async def security_headers(request, call_next):
     return response
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(entities.router, prefix="/api/v1")
+app.include_router(notifications.router, prefix="/api/v1")
 app.include_router(field_engine.router, prefix="/api/v1")
 app.include_router(tickets.router, prefix="/api/v1")
 app.include_router(attachments.router, prefix="/api/v1")

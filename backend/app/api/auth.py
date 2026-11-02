@@ -12,8 +12,8 @@ from sqlalchemy.orm import selectinload
 from app.core.config import get_settings
 from app.core.security import create_token, decode_token, verify_password
 from app.deps import CurrentUser, DbSession
-from app.models import User
-from app.schemas import LoginRequest, RefreshRequest, TokenPair, UserRead
+from app.models import Entity, User
+from app.schemas import LoginRequest, MeRead, OwnEntity, RefreshRequest, TokenPair
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -100,6 +100,9 @@ async def logout(payload: RefreshRequest) -> None:
         await redis.aclose()
 
 
-@router.get("/me", response_model=UserRead)
-async def me(user: CurrentUser) -> User:
-    return user
+@router.get("/me", response_model=MeRead)
+async def me(user: CurrentUser, db: DbSession) -> MeRead:
+    entity = await db.get(Entity, user.entity_id)
+    result = MeRead.model_validate(user)
+    result.entity = OwnEntity(id=entity.id, name=entity.name) if entity else None
+    return result

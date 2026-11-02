@@ -10,4 +10,12 @@ router = APIRouter(prefix="/entities", tags=["entities"])
 
 @router.get("", response_model=list[EntityRead])
 async def list_entities(user: CurrentUser, db: DbSession) -> list[Entity]:
-    return list((await db.scalars(select(Entity).order_by(Entity.name))).all())
+    visible = {user.entity_id}
+    # Only the existing admin-level right ("*") widens the list, and only to descendants of the caller's own entity.
+    if (user.profile.rights or {}).get("*") is True:
+        frontier = {user.entity_id}
+        while frontier:
+            children = set((await db.scalars(select(Entity.id).where(Entity.parent_id.in_(frontier)))).all()) - visible
+            visible |= children
+            frontier = children
+    return list((await db.scalars(select(Entity).where(Entity.id.in_(visible)).order_by(Entity.name))).all())
