@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,7 +15,13 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
     smtp_host: str = "mailhog"
     smtp_port: int = 1025
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_starttls: bool = False
+    smtp_use_ssl: bool = False
     mail_from: str = "no-reply@svcinfosys.in"
+    app_base_url: str = "http://localhost:3000"
+    invitation_ttl_hours: int = 24
     debug: bool = False
     auth_rate_limit: int = 5
     auth_rate_window_seconds: int = 60
@@ -23,6 +29,15 @@ class Settings(BaseSettings):
     trusted_proxy_ips: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_postgres_url(cls, value: str) -> str:
+        if value.startswith("postgres://"):
+            return value.replace("postgres://", "postgresql+asyncpg://", 1)
+        if value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -33,10 +48,22 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_security(self) -> "Settings":
+        smtp_password_configured = bool(
+            self.smtp_password and self.smtp_password.get_secret_value()
+        )
         if not self.debug and (len(self.jwt_secret) < 32 or self.jwt_secret.startswith(("change-this", "replace-"))):
             raise ValueError("JWT_SECRET must be at least 32 characters and non-default outside DEBUG")
         if "*" in self.cors_origin_list:
             raise ValueError("CORS_ORIGINS must be an explicit origin allow-list")
+        if self.smtp_starttls and self.smtp_use_ssl:
+            raise ValueError("SMTP_STARTTLS and SMTP_USE_SSL cannot both be enabled")
+        if bool(self.smtp_username) != smtp_password_configured:
+            raise ValueError("SMTP_USERNAME and SMTP_PASSWORD must be configured together")
+        if self.smtp_username and not (self.smtp_starttls or self.smtp_use_ssl):
+            raise ValueError("Authenticated SMTP requires STARTTLS or SSL")
+        if self.invitation_ttl_hours < 1:
+            raise ValueError("INVITATION_TTL_HOURS must be at least 1")
+        self.app_base_url = self.app_base_url.rstrip("/")
         return self
 
     @property

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
+import { useDismissable } from "./Popover";
 import {
   FilterOption, FilterOptions, TicketFilters, activeFilterCount, dateRangeInvalid,
 } from "../lib/ticketFilters";
@@ -33,14 +34,9 @@ function MultiSelect({ label, options, selected, onChange }: {
   const searchRef = useRef<HTMLInputElement>(null);
   const panelId = useId();
 
+  useDismissable({ id: panelId, open, onClose: () => setOpen(false), containerRef: wrapRef, triggerRef: buttonRef });
   useEffect(() => {
-    if (!open) return;
-    searchRef.current?.focus();
-    function onPointer(event: MouseEvent) {
-      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onPointer);
-    return () => document.removeEventListener("mousedown", onPointer);
+    if (open) searchRef.current?.focus();
   }, [open]);
 
   const visible = options.filter((option) => option.label.toLowerCase().includes(text.trim().toLowerCase()));
