@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -10,6 +11,7 @@ from sqlalchemy import select
 from app.api.tickets import can_update_tickets, scoped_ticket
 from app.deps import CurrentUser, DbSession
 from app.models import Ticket, TicketDocument, User
+from app.core.config import get_settings
 from app.services.attachments import (
     MAX_FILE_BYTES,
     MAX_FILES_PER_TICKET,
@@ -30,7 +32,7 @@ from app.workers.tasks import send_ticket_notification
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["attachments"])
-UPLOAD_ROOT = Path("/app/data/documents")
+UPLOAD_ROOT = Path(os.environ.get("UPLOAD_ROOT") or getattr(get_settings(), "upload_root", "/app/data/documents"))
 PROTECTIVE_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Content-Security-Policy": "default-src 'none'; sandbox",

@@ -89,3 +89,31 @@ def sanitize_ticket_description(value: str) -> str:
             f"Description must contain at least {MIN_DESCRIPTION_TEXT_LENGTH} characters of text."
         )
     return sanitized
+
+
+POLITE_PHRASES = [
+    r"\bthanks?\b",
+    r"\bthank you\b",
+    r"\ball (?:sorted|good|working|resolved|fixed)\b",
+    r"\b(?:issue|it'?s?)\s+(?:is\s+)?(?:resolved|fixed|working)\b",
+    r"\bworking now\b",
+    r"\bappreciate (?:it|your help)\b",
+    r"\bcheers\b",
+    r"\bperfect\b",
+    r"\bgreat\b",
+    r"\bmuch appreciated\b",
+    r"\bokay\b",
+    r"\bok\b",
+]
+
+
+def is_polite_acknowledgment(value: str) -> bool:
+    """Return True if message is a courteous closing/thank-you note rather than a new issue."""
+    import re
+    plain = rich_text_to_plain(value).strip().lower()
+    if not plain or len(plain) > 150:
+        return False
+    # If the user is reporting it's still broken, NOT a polite acknowledgment
+    if re.search(r"\b(?:not|still|doesn't|didn't|cannot|can't|broken|failed|error|wrong|reopen)\b", plain):
+        return False
+    return any(re.search(phrase, plain) for phrase in POLITE_PHRASES)

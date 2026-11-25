@@ -2,6 +2,7 @@
 
 import { ReactNode, useEffect, useState } from "react";
 import { SafeHtml } from "./SafeHtml";
+import SLADetailsPanel from "./SLADetailsPanel";
 
 type FormField = { key: string; label: string; type: string; page: string };
 type FormSchema = { pages: Record<string, FormField[]> };
@@ -13,6 +14,7 @@ export type DetailTicket = {
   status_label?: string | null;
   priority: number;
   priority_label?: string | null;
+  priority_code?: string | null;
   urgency?: number;
   impact?: number;
   source?: string;
@@ -21,6 +23,11 @@ export type DetailTicket = {
   closed_at?: string | null;
   tto_due_at?: string | null;
   ttr_due_at?: string | null;
+  first_responded_at?: string | null;
+  sla_matched_tier?: string | null;
+  sla_matched_reason?: string | null;
+  breach_code?: string | null;
+  breach_reason?: string | null;
   category_id?: number | null;
   ticket_type_id?: number | null;
   requester_name?: string | null;
@@ -28,6 +35,9 @@ export type DetailTicket = {
   assignee_name?: string | null;
   team_name?: string | null;
   flagged?: boolean | null;
+  sla_paused?: boolean;
+  paused_time_seconds?: number;
+  allowed_transitions?: string[];
   custom_fields?: Record<string, unknown>;
 };
 type Props = {
@@ -37,6 +47,7 @@ type Props = {
   categories: Array<{ id: number; name: string }>;
   ticketTypes: Array<{ id: number; name: string }>;
   entityName: string;
+  onRefresh?: () => void;
 };
 
 const SKIP_KEYS = new Set(["attachments"]);
@@ -48,7 +59,8 @@ function when(value?: string | null) {
   return Number.isNaN(date.getTime()) ? EMPTY : date.toLocaleString();
 }
 
-function slaState(due?: string | null, doneAt?: string | null) {
+function slaState(due?: string | null, doneAt?: string | null, isPaused?: boolean) {
+  if (isPaused) return "Paused";
   if (!due) return "Not set";
   const dueTime = new Date(due).getTime();
   if (doneAt) return new Date(doneAt).getTime() <= dueTime ? "Met" : "Breached";
@@ -59,7 +71,7 @@ function pageTitle(page: string) {
   return page.charAt(0).toUpperCase() + page.slice(1).replace(/[_-]/g, " ");
 }
 
-export default function TicketDetailsTab({ ticket, authorization, staff, categories, ticketTypes, entityName }: Props) {
+export default function TicketDetailsTab({ ticket, authorization, staff, categories, ticketTypes, entityName, onRefresh }: Props) {
   const [schema, setSchema] = useState<FormSchema | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error" | "unavailable">("loading");
   const [attempt, setAttempt] = useState(0);
@@ -127,13 +139,26 @@ export default function TicketDetailsTab({ ticket, authorization, staff, categor
           {ticket.closed_at && <div><dt>Closed</dt><dd>{when(ticket.closed_at)}</dd></div>}
         </dl>
       </section>
-      {staff && <section className="drawer-section">
-        <h3>Service levels</h3>
-        <dl className="details-grid">
-          <div><dt>Response target</dt><dd>{when(ticket.tto_due_at)} <span className={`sla-state sla-state-${slaState(ticket.tto_due_at, ticket.solved_at ?? ticket.closed_at).toLowerCase()}`}>{slaState(ticket.tto_due_at, ticket.solved_at ?? ticket.closed_at)}</span></dd></div>
-          <div><dt>Fix target</dt><dd>{when(ticket.ttr_due_at)} <span className={`sla-state sla-state-${slaState(ticket.ttr_due_at, ticket.solved_at ?? ticket.closed_at).toLowerCase()}`}>{slaState(ticket.ttr_due_at, ticket.solved_at ?? ticket.closed_at)}</span></dd></div>
-        </dl>
-      </section>}
+      {staff && (
+        <SLADetailsPanel
+          ticketId={ticket.id}
+          status={ticket.status}
+          authorization={authorization}
+          staff={staff}
+          ttoDueAt={ticket.tto_due_at}
+          ttrDueAt={ticket.ttr_due_at}
+          solvedAt={ticket.solved_at}
+          closedAt={ticket.closed_at}
+          firstRespondedAt={ticket.first_responded_at}
+          priorityCode={ticket.priority_code}
+          matchedTier={ticket.sla_matched_tier}
+          matchedReason={ticket.sla_matched_reason}
+          slaPaused={ticket.sla_paused}
+          breachCode={ticket.breach_code}
+          breachReason={ticket.breach_reason}
+          onRefresh={onRefresh}
+        />
+      )}
       {state === "loading" && <p className="muted" role="status">Loading ticket fields…</p>}
       {state === "error" && <div role="alert" className="form-error"><p>The ticket fields could not be loaded.</p><button type="button" className="secondary-button" onClick={() => setAttempt((value) => value + 1)}>Try again</button></div>}
       {state === "unavailable" && <p className="muted">No additional fields are available for this ticket type.</p>}

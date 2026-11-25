@@ -2,11 +2,13 @@
 
 import { KeyboardEvent, ReactNode, useId, useRef } from "react";
 
-export type DrawerTab = "activity" | "details";
+export type DrawerTab = "activity" | "details" | "links" | "solutions";
 
 const TABS: Array<{ key: DrawerTab; label: string }> = [
   { key: "activity", label: "Activity" },
   { key: "details", label: "Details" },
+  { key: "links", label: "Linked Tickets" },
+  { key: "solutions", label: "Solutions / KEDB" },
 ];
 
 export function DrawerTabs({ tab, onChange }: { tab: DrawerTab; onChange: (tab: DrawerTab) => void }) {

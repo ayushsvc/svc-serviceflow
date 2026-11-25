@@ -7,6 +7,7 @@ type UserRow = {
   name: string;
   email: string;
   is_active: boolean;
+  status: "Pending" | "Active" | "Deactivated";
   profile: { name: string; interface: string };
 };
 type Options = {
@@ -154,10 +155,12 @@ export default function UserManagementPanel({
           <div className="user-management-row" key={user.id}>
             <div><strong>{user.name}</strong><small>{user.email}</small></div>
             <span className="person-role">{user.profile.name}</span>
-            <span className={`user-account-status ${user.is_active ? "is-active" : "is-pending"}`}>{user.is_active ? "Active" : "Invitation pending"}</span>
-            {!user.is_active
+            <span className={`user-account-status is-${user.status.toLowerCase()}`}>{user.status}</span>
+            {user.status === "Pending"
               ? <button className="secondary-button" type="button" disabled={busy} onClick={() => void resend(user.id)}>Resend invite</button>
-              : user.id !== currentUserId && <button className="secondary-button" type="button" disabled={busy} onClick={() => void setActive(user, false)}>Deactivate</button>}
+              : user.status === "Active" && user.id !== currentUserId
+                ? <button className="secondary-button" type="button" disabled={busy} onClick={() => void setActive(user, false)}>Deactivate</button>
+                : null}
           </div>
         ))}
       </section>

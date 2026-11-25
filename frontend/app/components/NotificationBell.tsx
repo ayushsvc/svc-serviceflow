@@ -4,7 +4,12 @@ import { useCallback, useEffect, useState } from "react";
 import { Popover } from "./Popover";
 
 type NotificationItem = { id: string; ticket_id: number; ticket_title: string; kind: "reply" | "internal"; actor_name: string; summary: string; created_at: string };
-type Props = { authorization: string; userId: number | undefined; onOpenTicket: (ticketId: number) => void };
+type Props = {
+  authorization: string;
+  userId: number | undefined;
+  onOpenTicket: (ticketId: number) => void;
+  fetchFn?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+};
 
 const POLL_MS = 60_000;
 
@@ -20,7 +25,7 @@ function plain(html: string) {
   return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 }
 
-export default function NotificationBell({ authorization, userId, onOpenTicket }: Props) {
+export default function NotificationBell({ authorization, userId, onOpenTicket, fetchFn }: Props) {
   const storageKey = userId ? `svc-notifications-seen:${userId}` : null;
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
@@ -32,14 +37,15 @@ export default function NotificationBell({ authorization, userId, onOpenTicket }
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch("/api/v1/notifications", { headers: { Authorization: authorization } });
+      const call = fetchFn ?? fetch;
+      const response = await call("/api/v1/notifications", { headers: { Authorization: authorization } });
       if (!response.ok) { setState("error"); return; }
       setItems((await response.json()) as NotificationItem[]);
       setState("ready");
     } catch {
       setState("error");
     }
-  }, [authorization]);
+  }, [authorization, fetchFn]);
 
   useEffect(() => {
     void load();

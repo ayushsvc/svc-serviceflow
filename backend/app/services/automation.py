@@ -70,6 +70,13 @@ def calculate_sla_deadlines(
     schedule = calendar or {}
     ticket.tto_due_at = _add_business_minutes(opened, tto_minutes, schedule)
     ticket.ttr_due_at = _add_business_minutes(opened, ttr_minutes, schedule)
+    paused_seconds = int((ticket.custom_fields or {}).get("paused_time_seconds") or 0)
+    if paused_seconds > 0:
+        paused_delta = timedelta(seconds=paused_seconds)
+        if ticket.tto_due_at:
+            ticket.tto_due_at += paused_delta
+        if ticket.ttr_due_at:
+            ticket.ttr_due_at += paused_delta
 
 
 def condition_matches(ticket: Ticket, condition: dict) -> bool:

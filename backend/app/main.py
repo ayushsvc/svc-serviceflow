@@ -1,15 +1,68 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import attachments, audit, auth, automation, entities, field_engine, notifications, tickets, workflows
+from app.api import attachments, audit, auth, automation, entities, field_engine, notifications, sla, tickets, workflows
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+async def _periodic_scheduler():
+    """In-process periodic scheduler replacing Celery Beat.
+    Periodically checks SLA breaches, recurring tickets, solved ticket auto-closure,
+    and pending ticket nudges every 60 seconds.
+    """
+    from app.workers.tasks import (
+        _auto_close_solved_tickets,
+        _check_sla_breaches,
+        _create_recurring_tickets,
+        _nudge_pending_tickets,
+    )
+
+    # Initial delay on boot before starting background checks
+    await asyncio.sleep(5)
+    while True:
+        try:
+            await _check_sla_breaches()
+        except Exception as exc:
+            logger.warning("Error running in-process SLA breach check: %s", exc)
+
+        try:
+            await _create_recurring_tickets()
+        except Exception as exc:
+            logger.warning("Error running in-process recurring tickets: %s", exc)
+
+        try:
+            await _auto_close_solved_tickets()
+        except Exception as exc:
+            logger.warning("Error running in-process auto close check: %s", exc)
+
+        try:
+            await _nudge_pending_tickets()
+        except Exception as exc:
+            logger.warning("Error running in-process pending nudge check: %s", exc)
+
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            break
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    yield
+    scheduler_task = asyncio.create_task(_periodic_scheduler())
+    try:
+        yield
+    finally:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title=get_settings().app_name, version="0.1.0", lifespan=lifespan)
@@ -39,6 +92,7 @@ app.include_router(attachments.router, prefix="/api/v1")
 app.include_router(automation.router, prefix="/api/v1")
 app.include_router(audit.router, prefix="/api/v1")
 app.include_router(workflows.router, prefix="/api/v1")
+app.include_router(sla.router, prefix="/api/v1")
 
 
 @app.get("/health")

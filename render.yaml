@@ -13,6 +13,16 @@ envVarGroups:
         sync: false
       - key: INVITATION_TTL_HOURS
         value: "24"
+      - key: INVITE_ALLOWED_EMAIL_DOMAINS
+        sync: false
+      - key: INVITE_RATE_LIMIT
+        value: "30"
+      - key: INVITE_RATE_WINDOW_SECONDS
+        value: "3600"
+      - key: INVITE_ACCEPT_RATE_LIMIT
+        value: "10"
+      - key: INVITE_ACCEPT_RATE_WINDOW_SECONDS
+        value: "900"
       - key: SMTP_HOST
         value: smtp-relay.brevo.com
       - key: SMTP_PORT
@@ -34,10 +44,13 @@ services:
     runtime: docker
     region: oregon
     plan: starter
+    autoDeploy: false
+    healthCheckPath: /health
+    preDeployCommand: alembic upgrade head
     dockerContext: .
     dockerfilePath: ./backend/Dockerfile
     startCommand: >-
-      sh -c "alembic upgrade head && python -m app.seed --production &&
+      sh -c "python -m app.seed --production &&
       uvicorn app.main:app --host 0.0.0.0 --port 8000"
     disk:
       name: svc-serviceflow-uploads
@@ -50,10 +63,7 @@ services:
           name: svc-serviceflow-db
           property: connectionString
       - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: svc-serviceflow-redis
-          property: connectionString
+        value: "memory://"
       - key: SEED_ADMIN_EMAIL
         sync: false
       - key: SEED_ADMIN_NAME
@@ -66,6 +76,8 @@ services:
     runtime: docker
     region: oregon
     plan: starter
+    autoDeploy: false
+    healthCheckPath: /
     dockerContext: .
     dockerfilePath: ./frontend/Dockerfile
     envVars:
@@ -74,52 +86,6 @@ services:
           type: pserv
           name: svc-serviceflow-api
           property: hostport
-
-  - type: worker
-    name: svc-serviceflow-worker
-    runtime: docker
-    region: oregon
-    plan: starter
-    dockerContext: .
-    dockerfilePath: ./backend/Dockerfile
-    startCommand: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
-    envVars:
-      - fromGroup: svc-serviceflow-production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: svc-serviceflow-db
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: svc-serviceflow-redis
-          property: connectionString
-
-  - type: worker
-    name: svc-serviceflow-beat
-    runtime: docker
-    region: oregon
-    plan: starter
-    dockerContext: .
-    dockerfilePath: ./backend/Dockerfile
-    startCommand: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
-    envVars:
-      - fromGroup: svc-serviceflow-production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: svc-serviceflow-db
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: svc-serviceflow-redis
-          property: connectionString
-
-  - type: keyvalue
-    name: svc-serviceflow-redis
-    region: oregon
-    plan: starter
-    maxmemoryPolicy: noeviction
 
 databases:
   - name: svc-serviceflow-db

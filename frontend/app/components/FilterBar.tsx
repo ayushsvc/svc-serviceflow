@@ -86,6 +86,10 @@ export default function FilterBar({ filters, options, optionsError, staff, searc
   const set = (key: ListKey) => (next: string[]) => onChange({ ...filters, [key]: next });
   const labelFor = (list: FilterOption[], id: string) => list.find((option) => option.id === id)?.label ?? (list === opts.statuses || list === opts.priorities ? id : `#${id}`);
 
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const maxFrom = filters.to && filters.to < today ? filters.to : today;
+
   const chips: Array<{ key: string; text: string; remove: () => void }> = [];
   if (search.trim()) chips.push({ key: "search", text: `Search: ${search.trim()}`, remove: onClearSearch });
   const addChips = (key: ListKey, name: string, list: FilterOption[]) => filters[key].forEach((id) => chips.push({
@@ -124,8 +128,8 @@ export default function FilterBar({ filters, options, optionsError, staff, searc
           {basis === "created" ? "Created" : "Last updated"}
         </label>)}
       </div>}
-      <label>From<input type="date" value={filters.from} max={filters.to || undefined} onChange={(event) => onChange({ ...filters, from: event.target.value })} aria-invalid={rangeInvalid} /></label>
-      <label>To<input type="date" value={filters.to} min={filters.from || undefined} onChange={(event) => onChange({ ...filters, to: event.target.value })} aria-invalid={rangeInvalid} /></label>
+      <label>From<input type="date" value={filters.from} max={maxFrom} onChange={(event) => onChange({ ...filters, from: event.target.value > today ? today : event.target.value })} aria-invalid={rangeInvalid} /></label>
+      <label>To<input type="date" value={filters.to} min={filters.from || undefined} max={today} onChange={(event) => onChange({ ...filters, to: event.target.value > today ? today : event.target.value })} aria-invalid={rangeInvalid} /></label>
     </fieldset>
     {rangeInvalid && <p className="error" role="alert">The start date must be on or before the end date. The date range is not applied.</p>}
     {optionsError && <p className="error" role="alert">{optionsError}</p>}

@@ -2,13 +2,13 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from redis.asyncio import Redis
 from jose import JWTError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.db import get_db
+from app.core.kv import Redis, get_kv
 from app.core.security import decode_token
 from app.core.config import get_settings
 from app.models import User
@@ -26,6 +26,12 @@ async def current_user(token: Annotated[str, Depends(oauth2_scheme)], db: DbSess
         redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
         try:
             if await redis.get(f"revoked:{payload.get('jti')}"):
+                raise credentials_error
+            family = payload.get("family")
+            if family and await redis.get(f"revoked-family:{family}"):
+                raise credentials_error
+            epoch = await redis.get(f"auth:user-epoch:{payload['sub']}")
+            if epoch is not None and payload.get("session_epoch") != epoch:
                 raise credentials_error
         finally:
             await redis.aclose()

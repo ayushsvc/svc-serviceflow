@@ -39,7 +39,7 @@ class TicketCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str = Field(min_length=5, max_length=240)
     description: str = Field(max_length=30000)
-    type: str = Field(default="INCIDENT", pattern="^(INCIDENT|REQUEST|PROBLEM|PROJECT|FILE_SHARE|ADMIN_ACCESS|VPN_ACCESS)$")
+    type: str = Field(default="INCIDENT", pattern="^(INCIDENT|REQUEST|PROBLEM|CHANGE|PROJECT|FILE_SHARE|ADMIN_ACCESS|VPN_ACCESS)$")
     urgency: StrictInt | None = Field(default=None, ge=1, le=5)
     impact: StrictInt | None = Field(default=None, ge=1, le=5)
     priority: StrictInt | Literal["low", "medium", "high", "critical"] | None = None
@@ -72,6 +72,9 @@ class TicketUpdate(BaseModel):
     flagged: bool | None = None
     ticket_type_id: StrictInt | None = Field(default=None, gt=0)
     custom_fields: dict[str, Any] | None = None
+    hold_reason: str | None = Field(default=None, max_length=120)
+    breach_code: str | None = Field(default=None, max_length=64)
+    breach_reason: str | None = Field(default=None, max_length=1000)
 
 
 class TicketBulkUpdate(BaseModel):
@@ -170,6 +173,27 @@ class LinkRead(LinkCreate):
     id: int
     ticket_id: int
     created_at: datetime
+    linked_ticket_title: str | None = None
+    linked_ticket_status: str | None = None
+
+
+class KedbEntry(BaseModel):
+    id: int
+    ticket_id: int
+    ticket_title: str
+    solution_type: str
+    body: str
+    status: str
+    created_at: datetime
+
+
+class CascadeResolvePayload(BaseModel):
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class CascadeResolveResult(BaseModel):
+    resolved_count: int
+    child_ticket_ids: list[int]
 
 
 class TicketRead(BaseModel):
@@ -204,6 +228,21 @@ class TicketRead(BaseModel):
     assignee_name: str | None = None
     team_id: int | None = None
     team_name: str | None = None
+    allowed_transitions: list[str] = Field(default_factory=list)
+    sla_paused: bool = False
+    paused_time_seconds: int = 0
+    priority_code: str | None = None
+    sla_effective_start_at: datetime | None = None
+    first_responded_at: datetime | None = None
+    sla_matched_tier: str | None = None
+    sla_matched_reason: str | None = None
+    warn1_triggered: bool = False
+    warn2_triggered: bool = False
+    breach_triggered: bool = False
+    response_breach_triggered: bool = False
+    breach_code: str | None = None
+    breach_reason: str | None = None
+    sla_state: dict[str, Any] | None = None
 
 
 class TicketAssignResult(BaseModel):

@@ -1,74 +1,76 @@
+# Consolidated Production Docker Compose for SVC ServiceFlow
+# Runs the entire stack on a single low-cost VPS ($4-$6/mo) with minimal memory footprint (<400MB RAM)
 services:
-  api:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
-      JWT_SECRET: ${JWT_SECRET}
-      SMTP_HOST: ${SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      MAIL_FROM: ${MAIL_FROM}
-      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD}
-      SEED_TECHNICIAN_PASSWORD: ${SEED_TECHNICIAN_PASSWORD}
-      SEED_REQUESTER_PASSWORD: ${SEED_REQUESTER_PASSWORD}
-      CORS_ORIGINS: http://localhost:3000
-    ports: ["8000:8000"]
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
     depends_on:
-      db: { condition: service_healthy }
-      redis: { condition: service_started }
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+      - web
+
   web:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-    ports: ["3000:3000"]
-    depends_on: [api]
+    restart: unless-stopped
+    environment:
+      API_INTERNAL_HOSTPORT: api:8000
+    depends_on:
+      - api
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:-memory://}
+      JWT_SECRET: ${JWT_SECRET}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      MAIL_FROM: ${MAIL_FROM}
+      APP_BASE_URL: ${APP_BASE_URL}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD}
+      SEED_TECHNICIAN_PASSWORD: ${SEED_TECHNICIAN_PASSWORD}
+      SEED_REQUESTER_PASSWORD: ${SEED_REQUESTER_PASSWORD}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+    volumes:
+      - svc-uploads:/app/data/documents
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sh -c "alembic upgrade head && python -m app.seed --production && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-svc}
       POSTGRES_USER: ${POSTGRES_USER:-svc}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes: [svc-postgres:/var/lib/postgresql/data]
+    volumes:
+      - svc-postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U svc -d svc"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-svc} -d ${POSTGRES_DB:-svc}"]
       interval: 5s
       timeout: 5s
       retries: 10
-  redis:
-    image: redis:7-alpine
-    volumes: [svc-redis:/data]
-  worker:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
-      JWT_SECRET: ${JWT_SECRET}
-      SMTP_HOST: ${SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      MAIL_FROM: ${MAIL_FROM}
-    depends_on: [db, redis]
-    command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
-  beat:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
-      JWT_SECRET: ${JWT_SECRET}
-      SMTP_HOST: ${SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      MAIL_FROM: ${MAIL_FROM}
-    depends_on: [db, redis]
-    command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
-  mailhog:
-    image: mailhog/mailhog:v1.0.1
-    ports: ["18025:8025"]
+
 volumes:
   svc-postgres:
-  svc-redis:
+  svc-uploads:
+  caddy_data:
+  caddy_config:

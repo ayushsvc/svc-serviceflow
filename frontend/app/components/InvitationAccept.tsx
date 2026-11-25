@@ -31,7 +31,15 @@ export default function InvitationAccept({
       });
       if (!response.ok) {
         const detail = (await response.json().catch(() => null))?.detail;
-        setError(typeof detail === "string" ? detail : "This invitation is invalid, expired, or already used.");
+        if (response.status === 400) {
+          setError("This invitation is invalid, expired, or cancelled.");
+        } else if (typeof detail === "string") {
+          setError(detail);
+        } else if (Array.isArray(detail) && typeof detail[0]?.msg === "string") {
+          setError(detail[0].msg);
+        } else {
+          setError("Unable to activate this account. Please try again.");
+        }
         return;
       }
       const result = (await response.json()) as { email: string };
@@ -55,9 +63,9 @@ export default function InvitationAccept({
           <div className="mobile-brand"><img src="/svc-logo.png" alt="SVC Infosystems" /><strong>SVC ServiceFlow</strong></div>
           <p className="kicker">SET UP YOUR ACCOUNT</p>
           <h2>Choose a password</h2>
-          <p className="form-help">Use at least 12 characters. This invitation can only be used once.</p>
-          <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={12} maxLength={72} autoComplete="new-password" required /></label>
-          <label>Confirm password<input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} minLength={12} maxLength={72} autoComplete="new-password" required /></label>
+          <p className="form-help">Use at least 10 characters. This invitation can only be used once.</p>
+          <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={10} maxLength={72} autoComplete="new-password" required /></label>
+          <label>Confirm password<input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} minLength={10} maxLength={72} autoComplete="new-password" required /></label>
           {error && <p className="error" role="alert">{error}</p>}
           <button className="primary-button login-button" type="submit" disabled={submitting}>{submitting ? "Activating…" : "Activate account"}</button>
         </form>

@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.config import get_settings
+from app.core.kv import get_kv
 from app.models import (
     BusinessRule,
     Entity,
@@ -61,7 +62,7 @@ class BulkActionFailure(Exception):
 
 
 async def enforce_bulk_rate_limit(user_id: int) -> None:
-    redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
+    redis = get_kv()
     try:
         key = f"tickets:bulk:{user_id}"
         attempts = await redis.incr(key)
@@ -103,34 +104,80 @@ async def _apply_status(
                 values.get("assignee_id", ticket.assignee_id) is not None,
             )
         )
-        return
-    if ticket.status not in workflow.states or target not in workflow.states:
-        raise HTTPException(status_code=422, detail="Ticket status is not configured")
-    if target != ticket.status and target not in workflow.transitions.get(ticket.status, []):
-        raise HTTPException(status_code=409, detail="Invalid ticket transition")
-    if target in {"ASSIGNED", "PLANNED"} and values.get("assignee_id", ticket.assignee_id) is None:
-        raise HTTPException(status_code=422, detail="An assignee is required")
-    required_approvals = workflow.approval_requirements.get(target, 0)
-    if required_approvals:
-        approved = await db.scalar(
-            select(func.count(func.distinct(WorkflowApproval.decided_by)))
-            .select_from(WorkflowApproval)
-            .where(
-                WorkflowApproval.entity_id == user.entity_id,
-                WorkflowApproval.record_type == "ticket",
-                WorkflowApproval.record_id == ticket.id,
-                WorkflowApproval.transition_to == target,
-                WorkflowApproval.status == "APPROVED",
+    else:
+        if ticket.status not in workflow.states or target not in workflow.states:
+            raise HTTPException(status_code=422, detail="Ticket status is not configured")
+        if target != ticket.status and target not in workflow.transitions.get(ticket.status, []):
+            raise HTTPException(status_code=409, detail="Invalid ticket transition")
+        if target in {"ASSIGNED", "PLANNED"} and values.get("assignee_id", ticket.assignee_id) is None:
+            raise HTTPException(status_code=422, detail="An assignee is required")
+        required_approvals = workflow.approval_requirements.get(target, 0)
+        if required_approvals:
+            approved = await db.scalar(
+                select(func.count(func.distinct(WorkflowApproval.decided_by)))
+                .select_from(WorkflowApproval)
+                .where(
+                    WorkflowApproval.entity_id == user.entity_id,
+                    WorkflowApproval.record_type == "ticket",
+                    WorkflowApproval.record_id == ticket.id,
+                    WorkflowApproval.transition_to == target,
+                    WorkflowApproval.status == "APPROVED",
+                )
             )
-        )
-        if (approved or 0) < required_approvals:
-            raise HTTPException(status_code=409, detail="Required approvals are incomplete")
+            if (approved or 0) < required_approvals:
+                raise HTTPException(status_code=409, detail="Required approvals are incomplete")
     from datetime import UTC, datetime
+    from app.services.sla_service import handle_status_sla_transition, validate_breach_resolution
+
+    now = datetime.now(UTC)
+    if target in {"SOLVED", "CLOSED"}:
+        await validate_breach_resolution(
+            ticket,
+            target,
+            values.get("breach_code") or (ticket.custom_fields or {}).get("breach_code"),
+            values.get("breach_reason") or (ticket.custom_fields or {}).get("breach_reason"),
+            db,
+        )
+
+    if target != ticket.status:
+        hold_reason = values.get("hold_reason")
+        await handle_status_sla_transition(
+            ticket,
+            ticket.status,
+            target,
+            user.id,
+            db,
+            hold_reason=hold_reason,
+        )
 
     if target == "SOLVED":
-        values["solved_at"] = ticket.solved_at or datetime.now(UTC)
+        values["solved_at"] = ticket.solved_at or now
     elif target == "CLOSED":
-        values["closed_at"] = datetime.now(UTC)
+        values["closed_at"] = now
+
+    custom = dict(ticket.custom_fields or {})
+    if target == "PENDING" and ticket.status != "PENDING":
+        custom["pending_since"] = now.isoformat()
+        values["custom_fields"] = {**values.get("custom_fields", {}), **custom}
+    elif ticket.status == "PENDING" and target != "PENDING":
+        pending_since_str = custom.pop("pending_since", None)
+        if pending_since_str:
+            try:
+                pending_since = datetime.fromisoformat(pending_since_str)
+                if pending_since.tzinfo is None:
+                    pending_since = pending_since.replace(tzinfo=UTC)
+                pause_delta = now - pending_since
+                pause_seconds = max(0, int(pause_delta.total_seconds()))
+                existing_paused = int(custom.get("paused_time_seconds") or 0)
+                custom["paused_time_seconds"] = existing_paused + pause_seconds
+
+                if ticket.tto_due_at:
+                    ticket.tto_due_at = ticket.tto_due_at + pause_delta
+                if ticket.ttr_due_at:
+                    ticket.ttr_due_at = ticket.ttr_due_at + pause_delta
+            except Exception:
+                pass
+        values["custom_fields"] = {**values.get("custom_fields", {}), **custom}
 
 
 async def _apply_priority_sla(

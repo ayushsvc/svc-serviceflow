@@ -1,21 +1,11 @@
 {
   "name": "svc-infosystems",
   "private": true,
-  "version": "1.0.0",
-  "workspaces": [
-    "client",
-    "server"
-  ],
+  "version": "2.0.0",
+  "description": "SVC ServiceFlow - Modern, low-cost IT Service Management System",
   "scripts": {
-    "dev": "concurrently \"npm run dev --workspace server\" \"npm run dev --workspace client\"",
-    "build": "npm run build --workspace client",
-    "test": "npm test --workspace server"
-  },
-  "devDependencies": {
-    "concurrently": "^9.1.2"
-  },
-  "allowScripts": {
-    "better-sqlite3@11.10.0": true,
-    "esbuild@0.25.12": true
+    "dev:frontend": "npm run dev --prefix frontend",
+    "build:frontend": "npm run build --prefix frontend",
+    "export:frontend": "npm run build:export --prefix frontend"
   }
 }

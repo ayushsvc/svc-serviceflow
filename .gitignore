@@ -30,6 +30,8 @@ Thumbs.db
 # legacy Node/React app, not part of this project
 /server/
 /client/
+archive/
+*.tsbuildinfo
 
 
 docker-compose.override.yml

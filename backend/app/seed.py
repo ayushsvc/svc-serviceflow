@@ -1,6 +1,10 @@
 import asyncio
 import os
 import sys
+from dotenv import load_dotenv
+
+load_dotenv("../.env")
+load_dotenv(".env")
 
 from pydantic import EmailStr, TypeAdapter, ValidationError
 from sqlalchemy import select
@@ -10,6 +14,7 @@ from app.core.db import SessionLocal
 from app.core.security import hash_password
 from app.models import (
     BusinessRule,
+    Category,
     Entity,
     FieldDefinition,
     Group,
@@ -93,6 +98,11 @@ async def seed_entity_defaults(db: AsyncSession, entity: Entity) -> None:
                 )
             )
 
+    for cat_name in ["Hardware", "Software", "Network", "General Inquiry"]:
+        cat = await db.scalar(select(Category).where(Category.entity_id == entity.id, Category.name == cat_name))
+        if cat is None:
+            db.add(Category(name=cat_name, entity_id=entity.id, level=1))
+
     rule_name = f"{entity.name} Priority 1 Default Team"
     rule = await db.scalar(
         select(BusinessRule).where(BusinessRule.entity_id == entity.id, BusinessRule.name == rule_name)
@@ -143,6 +153,99 @@ async def seed_profile_rights(profiles: dict[str, Profile]) -> list[str]:
             profile.rights = rights
             changed.append(f"{name}: {', '.join(sorted(missing))}")
     return changed
+
+
+BASE_FIELD_DEFINITIONS = [
+    ("summary", "Summary", "text"),
+    ("details", "Details", "textarea"),
+    ("user", "User", "user"),
+    ("organisation", "Organisation", "text"),
+    ("category", "Category", "category"),
+    ("urgency", "Urgency", "number"),
+    ("impact", "Impact", "number"),
+    ("priority", "Priority", "number"),
+    ("team", "Team", "team"),
+    ("agent", "Agent", "agent"),
+    ("source", "Source", "select"),
+    ("asset", "Asset", "asset"),
+    ("sla", "SLA", "number"),
+    ("due_date", "Due date", "datetime"),
+    ("start_date", "Start date", "datetime"),
+    ("followup_date", "Follow-up date", "datetime"),
+    ("time_estimate", "Time estimate", "number"),
+    ("tags", "Tags", "multiselect"),
+    ("cc", "CC", "multiselect"),
+    ("parent_ticket", "Parent ticket", "number"),
+    ("related_tickets", "Related tickets", "multiselect"),
+    ("flag", "Flag", "checkbox"),
+    ("attachments", "Attachments", "text"),
+]
+
+BASE_TYPE_FIELDS = {
+    "Incident": ["summary", "details", "user", "organisation", "category", "urgency", "impact", "priority", "team", "agent", "source", "asset", "sla", "due_date", "start_date", "followup_date", "time_estimate", "tags", "cc", "parent_ticket", "related_tickets", "flag", "attachments"],
+    "Service Request": ["summary", "details", "user", "organisation", "category", "urgency", "impact", "priority", "team", "agent", "source", "asset", "sla", "due_date", "start_date", "followup_date", "time_estimate", "tags", "cc", "parent_ticket", "related_tickets", "flag", "attachments"],
+    "Problem": ["summary", "details", "user", "organisation", "category", "urgency", "impact", "priority", "team", "agent", "source", "asset", "sla", "due_date", "start_date", "followup_date", "tags", "related_tickets", "flag", "attachments"],
+    "Change": ["summary", "details", "user", "organisation", "category", "urgency", "impact", "priority", "team", "agent", "source", "asset", "sla", "due_date", "start_date", "followup_date", "time_estimate", "tags", "cc", "parent_ticket", "related_tickets", "flag", "attachments"],
+}
+
+
+async def seed_initial_ticket_types_and_fields(db: AsyncSession, entity: Entity) -> None:
+    field_map: dict[str, FieldDefinition] = {}
+    for key, label, ftype in BASE_FIELD_DEFINITIONS:
+        field = await db.scalar(select(FieldDefinition).where(FieldDefinition.key == key))
+        if field is None:
+            field = FieldDefinition(
+                key=key,
+                label=label,
+                type=ftype,
+                options={"widget": "attachments"} if key == "attachments" else {},
+                is_system=True,
+            )
+            db.add(field)
+            await db.flush()
+        field_map[key] = field
+
+    for name, itil_class, color in [
+        ("Incident", "INCIDENT", "#4f46e5"),
+        ("Service Request", "REQUEST", "#0f766e"),
+        ("Problem", "PROBLEM", "#b45309"),
+        ("Change", "CHANGE", "#7c3aed"),
+    ]:
+        ttype = await db.scalar(select(TicketTypeDefinition).where(TicketTypeDefinition.name == name))
+        if ttype is None:
+            ttype = TicketTypeDefinition(
+                name=name,
+                itil_class=itil_class,
+                default_priority=3,
+                icon="ticket",
+                color=color,
+                is_active=True,
+                entity_id=entity.id,
+            )
+            db.add(ttype)
+            await db.flush()
+
+        keys = BASE_TYPE_FIELDS.get(name, [])
+        portal_fields = PORTAL_EDITABLE_FIELDS if itil_class in {"INCIDENT", "REQUEST"} else set()
+        for pos, key in enumerate(keys, start=1):
+            fdef = field_map.get(key)
+            if not fdef:
+                continue
+            mapping = await db.get(TicketTypeField, (ttype.id, fdef.id))
+            if mapping is None:
+                db.add(
+                    TicketTypeField(
+                        ticket_type_id=ttype.id,
+                        field_definition_id=fdef.id,
+                        order=pos,
+                        page="details",
+                        required=key in {"summary", "details", "user"},
+                        visible_to_roles=ALL_ROLES if key in portal_fields else HELPDESK_ROLES,
+                        editable_by_roles=ALL_ROLES if key in portal_fields else HELPDESK_ROLES,
+                        show_on_portal=key in portal_fields,
+                    )
+                )
+    await db.flush()
 
 
 async def seed_ticket_type_field_defaults(db: AsyncSession) -> list[str]:
@@ -256,6 +359,11 @@ def _configured_users(*, production: bool) -> list[tuple[str, str, str, str]]:
 
 async def seed(*, production: bool = False) -> None:
     users = _configured_users(production=production)
+    from app.models import Base
+    from app.core.db import engine
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     async with SessionLocal() as db:
         entity = await db.scalar(select(Entity).where(Entity.name == "SVC Infosystems"))
         if entity is None:
@@ -275,6 +383,7 @@ async def seed(*, production: bool = False) -> None:
                 await db.flush()
             profiles[name] = profile
         updated_profile_rights = await seed_profile_rights(profiles)
+        await seed_initial_ticket_types_and_fields(db, entity)
         updated_form_fields = await seed_ticket_type_field_defaults(db)
         for email, name, profile_name, password in users:
             existing = await db.scalar(select(User).where(User.email == email))

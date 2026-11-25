@@ -10,6 +10,29 @@ type ReplyComposerProps = {
   onSent: () => Promise<void> | void;
 };
 
+const CANNED_RESPONSES = [
+  {
+    label: "⚡ Quick Action / Canned macro...",
+    text: "",
+  },
+  {
+    label: "📋 Request Diagnostics",
+    text: "Hello,\n\nTo assist you further with this issue, could you please provide:\n1. Exact error message or screenshot\n2. Device name / OS version\n3. Steps to reproduce the incident\n\nThank you,\nSupport Team",
+  },
+  {
+    label: "💡 Propose Known Workaround",
+    text: "Hello,\n\nA verified workaround is available in our Knowledge Base:\n- Please verify your network connection and flush DNS cache.\n- Restart the application and attempt sign-in.\n\nPlease reply to let us know if this resolves your issue.",
+  },
+  {
+    label: "✅ Ready for Closure",
+    text: "Hello,\n\nThe solution for your request has been implemented and verified. Please confirm everything is working smoothly on your end. This ticket will automatically close once confirmed.",
+  },
+  {
+    label: "🔑 Password / Access Reset",
+    text: "Hello,\n\nYour temporary access credentials have been reset and dispatched securely. Please log in and set a new password upon your first session.\n\nBest regards,\nSVC Support Team",
+  },
+];
+
 export default function ReplyComposer({ ticketId, headers, onSent }: ReplyComposerProps) {
   const [followup, setFollowup] = useState("");
   const [items, setItems] = useState<AttachmentItem[]>([]);
@@ -18,6 +41,11 @@ export default function ReplyComposer({ ticketId, headers, onSent }: ReplyCompos
   const [sending, setSending] = useState(false);
   // Kept after a partial failure so a retry attaches to the same reply instead of creating another.
   const [followupId, setFollowupId] = useState<number | null>(null);
+
+  function applyCanned(text: string) {
+    if (!text) return;
+    setFollowup((prev) => (prev.trim() ? `${prev}\n\n${text}` : text));
+  }
 
   useEffect(() => {
     setFollowup("");
@@ -69,8 +97,36 @@ export default function ReplyComposer({ ticketId, headers, onSent }: ReplyCompos
 
   return (
     <form className="reply-box" onSubmit={send}>
-      <div className="reply-type"><span>Public reply</span></div>
-      <textarea value={followup} onChange={(event) => setFollowup(event.target.value)} placeholder="Write a reply to the requester…" />
+      <div className="reply-type" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span>Public reply</span>
+        <select
+          className="canned-select"
+          style={{ fontSize: "11px", padding: "4px 8px", borderRadius: "5px", border: "1px solid var(--input-border)", background: "var(--input-bg)", cursor: "pointer", color: "var(--input-text)" }}
+          value=""
+          onChange={(e) => {
+            applyCanned(e.target.value);
+            e.target.value = "";
+          }}
+          aria-label="Insert canned response macro"
+        >
+          {CANNED_RESPONSES.map((macro, idx) => (
+            <option key={idx} value={macro.text} disabled={idx === 0}>
+              {macro.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <textarea
+        value={followup}
+        onChange={(event) => setFollowup(event.target.value)}
+        onKeyDown={(event) => {
+          if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }
+        }}
+        placeholder="Write a reply to the requester… (Ctrl+Enter to send)"
+      />
       <AttachmentDropzone
         items={items}
         setItems={setItems}
@@ -81,7 +137,10 @@ export default function ReplyComposer({ ticketId, headers, onSent }: ReplyCompos
         uploadFields={followupId !== null ? { followup_id: String(followupId) } : undefined}
       />
       {error && <p className="error" role="alert">{error}</p>}
-      <div className="reply-actions"><span>Visible to requester</span><button className="primary-button" type="submit" disabled={sending}>{sending ? "Sending…" : "Send reply"}</button></div>
+      <div className="reply-actions">
+        <span>Visible to requester · <b>Ctrl+Enter</b> to send</span>
+        <button className="primary-button" type="submit" disabled={sending}>{sending ? "Sending…" : "Send reply"}</button>
+      </div>
     </form>
   );
 }

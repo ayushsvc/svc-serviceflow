@@ -1,0 +1,15 @@
+# Production Caddyfile for SVC ServiceFlow
+# Replace {$DOMAIN:localhost} with your actual production domain (e.g. desk.svcinfosys.in)
+{$DOMAIN:localhost} {
+    encode gzip zstd
+
+    # Route all traffic to the Next.js web service (which internally routes /api/v1/* to FastAPI)
+    reverse_proxy web:3000
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+}

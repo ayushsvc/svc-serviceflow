@@ -2,13 +2,13 @@
 
 import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
-export type ToastState = { kind: "success" | "error"; text: string; id: number } | null;
+export type ToastState = { kind: "success" | "error" | "info"; text: string; id: number } | null;
 
 export function useToast() {
   const [toast, setToast] = useState<ToastState>(null);
   const timer = useRef<number | null>(null);
   const dismiss = useCallback(() => setToast(null), []);
-  const show = useCallback((kind: "success" | "error", text: string) => {
+  const show = useCallback((kind: "success" | "error" | "info", text: string) => {
     if (timer.current) window.clearTimeout(timer.current);
     setToast({ kind, text, id: Date.now() });
     timer.current = window.setTimeout(() => setToast(null), kind === "error" ? 8000 : 4000);

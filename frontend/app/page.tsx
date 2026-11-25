@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import FilterBar from "./components/FilterBar";
 import {
   FilterOptions, QueueName, TicketFilters, appendFilterParams, emptyFilters, filtersEqual, filtersFromProfile, filtersToProfile,
@@ -18,6 +18,10 @@ import SidebarNav, { NavEntry } from "./components/SidebarNav";
 import { DrawerTab, DrawerTabs, TabPanel } from "./components/DrawerTabs";
 import TicketActionsMenu from "./components/TicketActionsMenu";
 import TicketDetailsTab from "./components/TicketDetailsTab";
+import SLALiveBadge from "./components/SLALiveBadge";
+import SLAStudioModal from "./components/SLAStudioModal";
+import { TicketLinksTab, TicketSolutionsTab } from "./components/TicketLinksAndKedb";
+import ChangeCalendarPanel from "./components/ChangeCalendarPanel";
 import { ToastRegion, useToast } from "./components/Toast";
 import NotificationBell from "./components/NotificationBell";
 import InvitationAccept from "./components/InvitationAccept";
@@ -63,6 +67,24 @@ type Ticket = {
   requester_active?: boolean | null;
   requester_vip?: boolean | null;
   flagged?: boolean;
+  sla_paused?: boolean;
+  paused_time_seconds?: number;
+  allowed_transitions?: string[];
+  priority_code?: string | null;
+  sla_effective_start_at?: string | null;
+  first_responded_at?: string | null;
+  sla_matched_tier?: string | null;
+  sla_matched_reason?: string | null;
+  breach_code?: string | null;
+  breach_reason?: string | null;
+  sla_state?: {
+    health: string;
+    is_paused: boolean;
+    priority_code?: string;
+    matched_tier?: string;
+    response_breached?: boolean;
+    resolution_breached?: boolean;
+  } | null;
 };
 type TimelineItem = { kind: string; body: string; created_at: string; state?: string; is_private?: boolean };
 type CurrentUser = { id: number; name: string; email: string; entity_id?: number; entity?: { id: number; name: string } | null; profile: { name: string; interface: string; rights?: Record<string, boolean> } };
@@ -76,6 +98,16 @@ type PriorityOption = { value: number; label: string };
 type AssignmentPreview = { team_name: string | null; agent_name: string | null; priority: number; sla: { sla_name: string | null; response_target: string | null; fix_target: string | null } };
 type TicketWorkflow = { id?: number; entity_id?: number; record_type?: string; states: string[]; transitions: Record<string, string[]>; approval_requirements: Record<string, number>; is_active: boolean };
 type WorkflowApproval = { id: number; record_type: string; record_id: number; transition_to: string; step: number; status: string; note: string | null; created_at: string };
+type AnalyticsOverview = {
+  total_tickets: number;
+  open_tickets: number;
+  resolved_tickets: number;
+  high_priority_tickets: number;
+  unassigned_tickets: number;
+  sla_due_tickets: number;
+  status_counts: Record<string, number>;
+  priority_counts: Record<number, number>;
+};
 
 const statusLabels: Record<string, string> = {
   NEW: "New",
@@ -92,6 +124,7 @@ function Icon({ name }: { name: string }) {
     ticket: "M20 12a2 2 0 0 0 0-4V5H4v3a2 2 0 0 0 0 4 2 2 0 0 0 0 4v3h16v-3a2 2 0 0 0 0-4Z",
     users: "M16 20v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1M9.5 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM17 11a3 3 0 0 0 0-6M19 15a4 4 0 0 1 3 4v1",
     book: "M4 4.5A2.5 2.5 0 0 1 6.5 2H20v17H6.5A2.5 2.5 0 0 0 4 21.5v-17ZM4 18h16",
+    calendar: "M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2Zm0 16H5V10h14v10Z",
     chart: "M4 19V5M4 19h17M8 16v-3M12 16V8M16 16v-6M20 16v-9",
     settings: "M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-1.7 1.7-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5v.2h-2.4v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1L8 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H6.7v-2.4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L8 8.6l1.7-1.7.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5v-.2h2.4v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1 1.7 1.7-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.2v2.4h-.2a1.7 1.7 0 0 0-1.5 1Z",
     search: "m20 20-4.4-4.4M17 11a6 6 0 1 1-12 0 6 6 0 0 1 12 0Z",
@@ -101,7 +134,56 @@ function Icon({ name }: { name: string }) {
   };
   return <svg aria-hidden="true" viewBox="0 0 24 24" className="icon"><path d={paths[name]} /></svg>;
 }
+type ThemeMode = "light" | "dark" | "system";
+
+function useTheme() {
+  const [themeMode, setThemeMode] = useState<ThemeMode>("system");
+  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
+
+  useEffect(() => {
+    const saved = (window.localStorage.getItem("svc_theme") as ThemeMode) || "system";
+    setThemeMode(saved);
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const active = saved === "system" ? (media.matches ? "dark" : "light") : saved;
+    setResolvedTheme(active);
+    document.documentElement.setAttribute("data-theme", active);
+
+    const onMediaChange = () => {
+      const current = (window.localStorage.getItem("svc_theme") as ThemeMode) || "system";
+      if (current === "system") {
+        const next = media.matches ? "dark" : "light";
+        setResolvedTheme(next);
+        document.documentElement.setAttribute("data-theme", next);
+      }
+    };
+    media.addEventListener("change", onMediaChange);
+    return () => media.removeEventListener("change", onMediaChange);
+  }, []);
+
+  const handleThemeChange = (mode: ThemeMode) => {
+    setThemeMode(mode);
+    let active: "light" | "dark" = "light";
+    if (mode === "system") {
+      window.localStorage.removeItem("svc_theme");
+      active = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    } else {
+      window.localStorage.setItem("svc_theme", mode);
+      active = mode;
+    }
+    setResolvedTheme(active);
+    document.documentElement.setAttribute("data-theme", active);
+  };
+
+  const toggleTheme = () => {
+    const next = resolvedTheme === "dark" ? "light" : "dark";
+    handleThemeChange(next);
+  };
+
+  return { themeMode, resolvedTheme, handleThemeChange, toggleTheme };
+}
+
 export default function Home() {
+  const { themeMode, resolvedTheme, handleThemeChange, toggleTheme } = useTheme();
   const [email, setEmail] = useState("admin@svcinfosys.in");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
@@ -110,8 +192,24 @@ export default function Home() {
   const [invitationToken, setInvitationToken] = useState("");
 
   useEffect(() => {
-    const invite = new URLSearchParams(window.location.search).get("invite");
-    if (invite) setInvitationToken(invite);
+    const url = new URL(window.location.href);
+    const fragmentParams = new URLSearchParams(url.hash.slice(1));
+    const hasFragmentInvite = fragmentParams.has("invite");
+    const hasQueryInvite = url.searchParams.has("invite");
+    const invite = fragmentParams.get("invite") ?? url.searchParams.get("invite");
+    if (hasFragmentInvite || hasQueryInvite) {
+      url.searchParams.delete("invite");
+      fragmentParams.delete("invite");
+      url.hash = fragmentParams.size ? `#${fragmentParams.toString()}` : "";
+      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+      if (invite) setInvitationToken(invite);
+    }
+    try {
+      const stored = window.localStorage.getItem("svc_auth_token");
+      if (stored) {
+        setToken(JSON.parse(stored) as TokenPair);
+      }
+    } catch { /* ignore */ }
   }, []);
 
   async function login(event: FormEvent<HTMLFormElement>) {
@@ -127,10 +225,12 @@ export default function Home() {
       setMessage("Invalid email or password.");
       return;
     }
-    setToken((await response.json()) as TokenPair);
+    const pair = (await response.json()) as TokenPair;
+    try { window.localStorage.setItem("svc_auth_token", JSON.stringify(pair)); } catch { /* ignore */ }
+    setToken(pair);
   }
 
-  async function signOut() {
+  async function signOut(expiryNotice?: string) {
     if (token) {
       // Revoke the refresh token server-side; local sign-out proceeds even if the call fails.
       await fetch("/api/v1/auth/logout", {
@@ -139,10 +239,14 @@ export default function Home() {
         body: JSON.stringify({ refresh_token: token.refresh_token }),
       }).catch(() => undefined);
     }
+    try { window.localStorage.removeItem("svc_auth_token"); } catch { /* ignore */ }
     Object.keys(window.localStorage).filter((key) => key.startsWith("svc-ticket-draft:")).forEach((key) => window.localStorage.removeItem(key));
     window.history.replaceState(null, "", window.location.pathname);
     setPassword("");
     setToken(null);
+    if (typeof expiryNotice === "string") {
+      setMessage(expiryNotice);
+    }
   }
 
   if (invitationToken) return <InvitationAccept invitationToken={invitationToken} onComplete={(invitedEmail) => {
@@ -152,7 +256,7 @@ export default function Home() {
     setMessage("Your account is active. Sign in with your new password.");
     setAccountActivated(true);
   }} />;
-  if (token) return <TicketWorkspace token={token} onSignOut={signOut} />;
+  if (token) return <TicketWorkspace token={token} onSignOut={signOut} onTokenUpdated={setToken} themeMode={themeMode} resolvedTheme={resolvedTheme} onThemeChange={handleThemeChange} onToggleTheme={toggleTheme} />;
 
   return (
     <main className="login-page">
@@ -161,7 +265,18 @@ export default function Home() {
         <div className="login-copy"><p className="kicker">SERVICE OPERATIONS</p><h1>Request to Resolution</h1><p>One focused workspace for employees, technicians, and IT leadership.</p></div>
         <div className="login-footer"><span>Request to Resolution</span><span>v1.0</span></div>
       </section>
-      <section className="login-form-wrap">
+      <section className="login-form-wrap" style={{ position: "relative" }}>
+        <div style={{ position: "absolute", top: 20, right: 24 }}>
+          <button
+            type="button"
+            className="theme-toggle-btn"
+            onClick={toggleTheme}
+            title={`Switch to ${resolvedTheme === "dark" ? "light" : "dark"} mode`}
+            aria-label="Toggle theme"
+          >
+            {resolvedTheme === "dark" ? "☀️ Light" : "🌙 Dark"}
+          </button>
+        </div>
         <form className="login-form" onSubmit={login}>
           <div className="mobile-brand"><img src="/svc-logo.png" alt="SVC Infosystems" /><strong>SVC ServiceFlow</strong></div>
           <p className="kicker">WELCOME BACK</p><h2>Sign in to your workspace</h2><p className="form-help">Use your work account to continue.</p>
@@ -195,11 +310,29 @@ function DynamicFields({ schema, values, onChange, portal }: { schema: FormSchem
     if (field.type === "select") return <label key={field.key}>{field.label}<select {...common}><option value="">Select {field.label.toLowerCase()}</option>{choices.map((choice) => <option key={choice} value={choice}>{choice}</option>)}</select></label>;
     if (field.type === "checkbox") return <label className="checkbox" key={field.key}><input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(field.key, event.target.checked)} /> {field.label}</label>;
     return <label key={field.key}>{field.label}<input type={field.type === "number" ? "number" : field.type === "date" ? "date" : field.type === "datetime" ? "datetime-local" : "text"} {...common} /></label>;
-  })}</div>;
+  })}
+    </div>;
 }
 
-function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: () => Promise<void> | void }) {
+function TicketWorkspace({
+  token,
+  onSignOut,
+  onTokenUpdated,
+  themeMode,
+  resolvedTheme,
+  onThemeChange,
+  onToggleTheme,
+}: {
+  token: TokenPair;
+  onSignOut: (notice?: string) => Promise<void> | void;
+  onTokenUpdated?: (fresh: TokenPair) => void;
+  themeMode: ThemeMode;
+  resolvedTheme: "light" | "dark";
+  onThemeChange: (mode: ThemeMode) => void;
+  onToggleTheme: () => void;
+}) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [analytics, setAnalytics] = useState<AnalyticsOverview | null>(null);
   const [selected, setSelected] = useState<Ticket | null>(null);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [query, setQuery] = useState("");
@@ -244,6 +377,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   const [createdTicket, setCreatedTicket] = useState<Ticket | null>(null);
   const [createError, setCreateError] = useState("");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [slaStudioOpen, setSlaStudioOpen] = useState(false);
   const [drawerTab, setDrawerTab] = useState<DrawerTab>("activity");
   const [peopleView, setPeopleView] = useState<"all" | "technicians" | "requesters" | "users">("all");
   const { toast, show: showToast, dismiss: dismissToast } = useToast();
@@ -293,9 +427,126 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     setActiveListProfileId("");
   }
 
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    function handleGlobalKeys(event: globalThis.KeyboardEvent) {
+      if (event.key === "/" && !["INPUT", "TEXTAREA", "SELECT"].includes((event.target as HTMLElement)?.tagName)) {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+      } else if (event.key === "Escape" && showDrawer && !showCreate && assignmentPickerTicketId === null) {
+        setShowDrawer(false);
+      }
+    }
+    window.addEventListener("keydown", handleGlobalKeys);
+    return () => window.removeEventListener("keydown", handleGlobalKeys);
+  }, [showDrawer, showCreate, assignmentPickerTicketId]);
+
+  function handleHeaderSort(column: TicketListColumn) {
+    if (["id", "title", "status", "priority", "opened_at"].includes(column)) {
+      if (listSort === column) {
+        setListDirection((current) => (current === "asc" ? "desc" : "asc"));
+      } else {
+        setListSort(column);
+        setListDirection("desc");
+      }
+      setListPage(1);
+    }
+  }
+
+  const tokenRef = useRef<TokenPair>(token);
+  useEffect(() => {
+    tokenRef.current = token;
+  }, [token]);
+
   const apiHeaders = { Authorization: `Bearer ${token.access_token}` };
   const apiAuthorization = apiHeaders.Authorization;
   const entityName = currentUser?.entity?.name ?? "";
+
+  const refreshingRef = useRef<Promise<string | null> | null>(null);
+
+  const refreshToken = useCallback(async (): Promise<string | null> => {
+    const currentRefreshToken = tokenRef.current?.refresh_token;
+    if (!currentRefreshToken) {
+      void onSignOut("Your session has expired. Please sign in again.");
+      return null;
+    }
+    if (refreshingRef.current) return refreshingRef.current;
+
+    refreshingRef.current = (async () => {
+      try {
+        const resp = await fetch("/api/v1/auth/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: currentRefreshToken }),
+        });
+        if (!resp.ok) {
+          void onSignOut("Your session has expired. Please sign in again.");
+          return null;
+        }
+        const fresh = (await resp.json()) as TokenPair;
+        tokenRef.current = fresh;
+        try { window.localStorage.setItem("svc_auth_token", JSON.stringify(fresh)); } catch { /* ignore */ }
+        onTokenUpdated?.(fresh);
+        return fresh.access_token;
+      } catch {
+        return null;
+      } finally {
+        refreshingRef.current = null;
+      }
+    })();
+
+    return refreshingRef.current;
+  }, [onSignOut, onTokenUpdated]);
+
+  const authFetch = useCallback(
+    async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const activeAccessToken = tokenRef.current?.access_token;
+      const headers = new Headers(init?.headers);
+      if (activeAccessToken) {
+        headers.set("Authorization", `Bearer ${activeAccessToken}`);
+      }
+
+      let resp = await fetch(input, {
+        ...init,
+        headers,
+      });
+
+      if (resp.status === 401) {
+        const freshAccessToken = await refreshToken();
+        if (freshAccessToken) {
+          headers.set("Authorization", `Bearer ${freshAccessToken}`);
+          resp = await fetch(input, {
+            ...init,
+            headers,
+          });
+        }
+      }
+      return resp;
+    },
+    [refreshToken],
+  );
+
+  // Proactive background silent token renewal every 20 minutes
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void refreshToken();
+    }, 20 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [refreshToken]);
+
+  const loadAnalytics = useCallback(async () => {
+    try {
+      const resp = await authFetch("/api/v1/tickets/analytics/overview");
+      if (resp.ok) setAnalytics((await resp.json()) as AnalyticsOverview);
+    } catch { /* ignore */ }
+  }, [authFetch]);
+
+  useEffect(() => {
+    if (activeNav === "Overview" || activeNav === "Reports") {
+      void loadAnalytics();
+    }
+  }, [activeNav, loadAnalytics]);
   useEffect(() => {
     if (!mobileNavOpen) return undefined;
     const onKey = (event: KeyboardEvent) => {
@@ -309,12 +560,12 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     if (!currentUser) return;
     const id = Number(new URLSearchParams(window.location.search).get("ticket"));
     if (!Number.isInteger(id) || id <= 0) return;
-    void fetch(`/api/v1/tickets/${id}`, { headers: apiHeaders }).then(async (response) => {
+    void authFetch(`/api/v1/tickets/${id}`).then(async (response) => {
       if (response.ok) { await selectTicket((await response.json()) as Ticket); }
       else showToast("error", "That ticket is not available to you.");
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser?.id]);
+  }, [currentUser?.id, authFetch]);
   function navigateTo(label: string) {
     setActiveNav(label);
     setMobileNavOpen(false);
@@ -344,7 +595,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         ...(currentUser.profile.rights?.["*"] ? [{ key: "users", label: "Users", active: peopleView === "users", onSelect: () => setPeopleView("users") }] : []),
       ] : undefined,
     },
-    { icon: "book", label: "Knowledge base" },
+    { icon: "calendar", label: "Change Calendar" },
     { icon: "chart", label: "Reports" },
     ...(currentUser?.profile.interface === "helpdesk" ? [{ icon: "ticket", label: "Approvals" }, ...(currentUser.profile.name === "Administrator" ? [{ icon: "settings", label: "Workflows" }] : [])] : []),
   ];
@@ -368,7 +619,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     filterParams.forEach((value, key) => params.append(key, value));
     if (tabsAccess && queueFilter !== "all") params.set("queue", queueFilter);
     try {
-      const response = await fetch(`/api/v1/tickets?${params.toString()}`, { headers: apiHeaders });
+      const response = await authFetch(`/api/v1/tickets?${params.toString()}`);
       if (seq !== loadSeq.current) return;
       if (!response.ok) { setError(listErrorMessage(response.status)); return; }
       const result = (await response.json()) as {
@@ -383,10 +634,10 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
       setPriorityOptions(result.priority_options ?? []);
       const countQuery = filterParams.toString() ? `?${filterParams.toString()}` : "";
       if (tabsAccess) {
-        const queueResponse = await fetch(`/api/v1/tickets/queue-counts${countQuery}`, { headers: apiHeaders });
+        const queueResponse = await authFetch(`/api/v1/tickets/queue-counts${countQuery}`);
         if (queueResponse.ok && seq === loadSeq.current) setQueueCounts(await queueResponse.json() as typeof queueCounts);
       }
-      const countsResponse = await fetch(`/api/v1/tickets/team-counts${countQuery}`, { headers: apiHeaders });
+      const countsResponse = await authFetch(`/api/v1/tickets/team-counts${countQuery}`);
       if (countsResponse.ok && seq === loadSeq.current) setTeamCounts((await countsResponse.json()) as Array<{ team_id: number | null; count: number }>);
     } catch {
       if (seq === loadSeq.current) setError("Unable to load tickets.");
@@ -422,9 +673,9 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         direction: listDirection,
         page_size: listPageSize,
       };
-    const response = await fetch("/api/v1/tickets/list-profiles", {
+    const response = await authFetch("/api/v1/tickets/list-profiles", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...apiHeaders },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: profileName.trim(), kind: profileSaveKind, config }),
     });
     if (!response.ok) { setError(response.status === 409 ? "A profile with that name already exists." : "Unable to save this profile."); return; }
@@ -438,9 +689,8 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   async function setDefaultListProfile() {
     const profile = listProfiles.find((item) => String(item.id) === activeListProfileId);
     if (!profile) return;
-    const response = await fetch(`/api/v1/tickets/list-profiles/${profile.id}/set-default`, {
+    const response = await authFetch(`/api/v1/tickets/list-profiles/${profile.id}/set-default`, {
       method: "POST",
-      headers: apiHeaders,
     });
     if (!response.ok) { setError("Unable to set this profile as the default."); return; }
     const updated = (await response.json()) as SavedListProfile;
@@ -454,8 +704,8 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     setAssignmentMessage("");
     setShowDrawer(true);
     const [detailResponse, timelineResponse] = await Promise.all([
-      fetch(`/api/v1/tickets/${ticket.id}`, { headers: apiHeaders }),
-      fetch(`/api/v1/tickets/${ticket.id}/timeline`, { headers: apiHeaders }),
+      authFetch(`/api/v1/tickets/${ticket.id}`),
+      authFetch(`/api/v1/tickets/${ticket.id}/timeline`),
     ]);
     if (detailResponse.ok) setSelected((await detailResponse.json()) as Ticket);
     if (timelineResponse.ok) setTimeline((await timelineResponse.json()) as TimelineItem[]);
@@ -464,7 +714,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     setSelected((current) => current?.id === updated.id ? { ...current, ...updated } : current);
     setTickets((items) => items.map((item) => item.id === updated.id ? { ...item, ...updated } : item));
     setAssignmentMessage(`Ticket #${updated.id} assignment updated.`);
-    const response = await fetch(`/api/v1/tickets/${updated.id}/timeline`, { headers: apiHeaders });
+    const response = await authFetch(`/api/v1/tickets/${updated.id}/timeline`);
     if (response.ok) setTimeline((await response.json()) as TimelineItem[]);
     await loadTickets();
   }
@@ -473,7 +723,7 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     const previousSelected = selected;
     setTickets((items) => items.map((item) => item.id === ticket.id ? { ...item, assignee_id: currentUser?.id ?? null, status: item.status === "NEW" ? "ASSIGNED" : item.status } : item));
     if (selected?.id === ticket.id) setSelected({ ...selected, assignee_id: currentUser?.id ?? null, status: selected.status === "NEW" ? "ASSIGNED" : selected.status });
-    const response = await fetch(`/api/v1/tickets/${ticket.id}/claim`, { method: "POST", headers: apiHeaders });
+    const response = await authFetch(`/api/v1/tickets/${ticket.id}/claim`, { method: "POST" });
     if (!response.ok) {
       setTickets(previousTickets);
       setSelected(previousSelected);
@@ -486,6 +736,24 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     if (selected?.id === claimed.id) setSelected(claimed);
     setError("");
     await loadTickets();
+  }
+  async function quickUpdateStatus(ticket: Ticket, newStatus: string) {
+    try {
+      const response = await authFetch(`/api/v1/tickets/${ticket.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (!response.ok) {
+        const detail = ((await response.json().catch(() => ({}))) as { detail?: string }).detail;
+        showToast("error", detail || "Could not update status.");
+        return;
+      }
+      showToast("success", `Ticket #${ticket.id} status updated to ${statusLabels[newStatus] ?? newStatus}.`);
+      await Promise.all([selectTicket(ticket), loadTickets()]);
+    } catch {
+      showToast("error", "Network error updating ticket status.");
+    }
   }
   useEffect(() => {
     const { filters: urlFilters, search, queue } = parseUrl(window.location.search);
@@ -525,18 +793,33 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
   }, [urlReady, userLoaded, query, filters, listPage, listPageSize, listSort, listDirection, queueFilter, tabsAccess]);
   useEffect(() => { if (viewAllAccess && !urlHadQueue.current) { queueDefaulted.current = true; setQueueFilter("unassigned"); setListPage(1); } }, [viewAllAccess]);
   useEffect(() => {
-    void fetch("/api/v1/auth/me", { headers: apiHeaders }).then((response) => response.ok ? response.json() : null).then((user: CurrentUser | null) => setCurrentUser(user)).catch(() => undefined).finally(() => setUserLoaded(true));
-  }, []);
+    let active = true;
+    async function loadUser() {
+      try {
+        const response = await authFetch("/api/v1/auth/me");
+        if (response.ok) {
+          const user = (await response.json()) as CurrentUser;
+          if (active) setCurrentUser(user);
+        }
+      } catch {
+        // ignore
+      } finally {
+        if (active) setUserLoaded(true);
+      }
+    }
+    void loadUser();
+    return () => { active = false; };
+  }, [authFetch]);
   useEffect(() => {
     if (!currentUser) return;
-    void fetch("/api/v1/tickets/filter-options", { headers: apiHeaders })
+    void authFetch("/api/v1/tickets/filter-options")
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(String(response.status))))
       .then((raw) => { setFilterOptions(optionsFromResponse(raw)); setFilterOptionsError(""); })
       .catch(() => setFilterOptionsError("Filter options could not be loaded. Filtering by name is unavailable until you refresh."));
-  }, [currentUser]);
+  }, [currentUser, authFetch]);
   useEffect(() => {
     if (!currentUser) return;
-    void fetch("/api/v1/tickets/list-profiles", { headers: apiHeaders })
+    void authFetch("/api/v1/tickets/list-profiles")
       .then((response) => {
         if (!response.ok) { setError("Unable to load saved ticket profiles."); return null; }
         return response.json() as Promise<SavedListProfile[]>;
@@ -550,22 +833,22 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         if (defaultColumns && Array.isArray(defaultColumns.config.columns)) setListColumns(defaultColumns.config.columns as TicketListColumn[]);
       }, () => setError("Unable to load saved ticket profiles."));
     if (currentUser.profile.interface === "helpdesk") {
-      void fetch("/api/v1/requesters", { headers: apiHeaders })
+      void authFetch("/api/v1/requesters")
         .then((response) => response.ok ? response.json() : [])
         .then((users: Requester[]) => setRequesters(users));
     }
     void Promise.all([
-      fetch("/api/v1/categories", { headers: apiHeaders }).then((response) => response.ok ? response.json() : []),
-      fetch("/api/v1/groups", { headers: apiHeaders }).then((response) => response.ok ? response.json() : []),
+      authFetch("/api/v1/categories").then((response) => response.ok ? response.json() : []),
+      authFetch("/api/v1/groups").then((response) => response.ok ? response.json() : []),
     ]).then(([categoryList, groupList]: [Category[], Group[]]) => {
       setCategories(categoryList); setGroups(groupList);
     });
     if (currentUser.profile.interface === "helpdesk") {
-      void fetch("/api/v1/agents", { headers: apiHeaders })
+      void authFetch("/api/v1/agents")
         .then((response) => response.ok ? response.json() : [])
         .then((agentList: Requester[]) => setAgents(agentList));
     }
-    void fetch("/api/v1/ticket-types", { headers: apiHeaders })
+    void authFetch("/api/v1/ticket-types")
       .then((response) => {
         if (!response.ok) {
           setCreateError("Unable to load ticket types. Please try again or contact support.");
@@ -578,12 +861,12 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         const incident = types.find((item) => item.itil_class === "INCIDENT") ?? types[0];
         if (incident) setTicketType(String(incident.id));
       });
-  }, [currentUser]);
+  }, [currentUser, authFetch]);
   useEffect(() => {
     // Wait for the numeric id resolved from the ticket types list; the endpoint rejects anything else with 422.
     if (!/^\d+$/.test(ticketType)) { setFormSchema(null); return; }
     let cancelled = false;
-    void fetch(`/api/v1/ticket-types/${ticketType}/form`, { headers: apiHeaders })
+    void authFetch(`/api/v1/ticket-types/${ticketType}/form`)
       .then((response) => response.ok ? response.json() : null)
       .then((schema: FormSchema | null) => {
         if (cancelled) return;
@@ -594,14 +877,28 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         }
       });
     return () => { cancelled = true; };
-  }, [ticketType]);
+  }, [ticketType, authFetch]);
   useEffect(() => {
     if (!/^\d+$/.test(ticketType) || !showCreate) return;
     const params = new URLSearchParams({ ticket_type_id: ticketType, urgency, impact });
-    void fetch(`/api/v1/tickets/assignment-preview?${params.toString()}`, { headers: apiHeaders })
+    void authFetch(`/api/v1/tickets/assignment-preview?${params.toString()}`)
       .then((response) => response.ok ? response.json() : null)
       .then((preview: AssignmentPreview | null) => setAssignmentPreview(preview));
-  }, [ticketType, urgency, impact, showCreate]);
+  }, [ticketType, urgency, impact, showCreate, authFetch]);
+  useEffect(() => {
+    if (!showCreate || ticketTypes.length > 0) return;
+    void authFetch("/api/v1/ticket-types")
+      .then((response) => response.ok ? response.json() as Promise<TicketType[]> : [])
+      .then((types: TicketType[]) => {
+        if (!types || types.length === 0) return;
+        setTicketTypes(types);
+        if (!ticketType || !types.some((t) => String(t.id) === ticketType)) {
+          const incident = types.find((item) => item.itil_class === "INCIDENT") ?? types[0];
+          if (incident) setTicketType(String(incident.id));
+        }
+      })
+      .catch(() => undefined);
+  }, [showCreate, ticketTypes.length, authFetch]);
   useEffect(() => {
     if (showCreate) {
       const saved = draftKey ? window.localStorage.getItem(draftKey) : null;
@@ -611,7 +908,15 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
           if (!draft.savedAt || Date.now() - draft.savedAt > 7 * 24 * 60 * 60 * 1000) {
             window.localStorage.removeItem(draftKey!);
           } else {
-            setNewTitle(draft.title ?? ""); setNewDescription(draft.description ?? ""); setTicketType(/^\d+$/.test(draft.type ?? "") ? String(draft.type) : ticketType); setCustomFields(draft.fields ?? {});
+            setNewTitle(draft.title ?? "");
+            setNewDescription(draft.description ?? "");
+            if (draft.type && /^\d+$/.test(String(draft.type))) {
+              setTicketType(String(draft.type));
+            } else if (!ticketType && ticketTypes.length > 0) {
+              const incident = ticketTypes.find((t) => t.itil_class === "INCIDENT") ?? ticketTypes[0];
+              if (incident) setTicketType(String(incident.id));
+            }
+            setCustomFields(draft.fields ?? {});
             setDraftSaved(true);
           }
         } catch { window.localStorage.removeItem(draftKey!); }
@@ -646,8 +951,8 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
       delete ticketFields.user;
       delete ticketFields.organisation;
     }
-    const response = await fetch("/api/v1/tickets", {
-      method: "POST", headers: { "Content-Type": "application/json", ...apiHeaders },
+    const response = await authFetch("/api/v1/tickets", {
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title,
         description,
@@ -716,14 +1021,35 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
     if (column === "title") return <div className="ticket-cell"><strong>#{ticket.id} {ticket.requester_vip ? "★ " : ""}{ticket.flagged ? "⚑ " : ""}{ticket.requester_active === false ? "⚠ " : ""}{ticket.title}</strong><span>{ticket.description.slice(0, 62)}{ticket.description.length > 62 ? "…" : ""}</span></div>;
     if (column === "id") return `#${ticket.id}`;
     if (column === "status") return <span className={`status status-${ticket.status.toLowerCase()}`}><i />{ticket.status_label ?? statusLabels[ticket.status] ?? ticket.status}</span>;
-    if (column === "priority") return <span className={`priority priority-${ticket.priority}`}>{ticket.priority_label ?? `Priority ${ticket.priority}`}{!requesterAccess && <b>{ticket.priority}</b>}</span>;
+    if (column === "priority") {
+      const pCode = ticket.priority_code || `P${ticket.priority}`;
+      return (
+        <span className={`priority priority-${ticket.priority}`} style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+          <span style={{ fontSize: "11px", fontWeight: 700, padding: "1px 5px", borderRadius: "3px", backgroundColor: pCode === "P1" ? "#fee2e2" : pCode === "P2" ? "#ffedd5" : "rgba(0,0,0,0.06)", color: pCode === "P1" ? "#991b1b" : pCode === "P2" ? "#9a3412" : "inherit" }}>
+            {pCode}
+          </span>
+          <span>{ticket.priority_label ?? `Priority ${ticket.priority}`}</span>
+          {!requesterAccess && <b>{ticket.priority}</b>}
+        </span>
+      );
+    }
     if (column === "opened_at") return new Date(ticket.opened_at).toLocaleDateString();
     if (column === "requester_name") return ticket.requester_name ?? "—";
     if (column === "requester_active") return ticket.requester_active == null ? "—" : ticket.requester_active ? "Active" : "Inactive";
     if (column === "requester_vip") return ticket.requester_vip ? "★ VIP" : "—";
     if (column === "flagged") return ticket.flagged ? "Flagged" : "—";
     if (column === "assignee_id") return <span className="assignee"><span className="avatar avatar-orange">AT</span>{ticket.assignee_id ? "Assigned" : "Unassigned"}</span>;
-    if (column === "ttr_due_at") return <span className={`sla ${ticket.ttr_due_at && new Date(ticket.ttr_due_at) < new Date() ? "sla-breach" : ""}`}>{ticket.ttr_due_at ? formatDue(ticket.ttr_due_at) : "Not set"}</span>;
+    if (column === "ttr_due_at") {
+      const isPaused = ticket.status === "PENDING" || ticket.sla_paused;
+      return (
+        <SLALiveBadge
+          dueAt={ticket.ttr_due_at}
+          solvedAt={["SOLVED", "CLOSED"].includes(ticket.status) ? "resolved" : undefined}
+          isPaused={isPaused}
+          health={ticket.sla_state?.health}
+        />
+      );
+    }
     return null;
   }
   function clearFilters() {
@@ -759,9 +1085,21 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
       <div className="sidebar-bottom"><button className={`nav-item ${activeNav === "Settings" ? "active" : ""}`} onClick={() => navigateTo("Settings")}><Icon name="settings" /><span>Settings</span></button><div className="user-card"><span className="avatar avatar-slate">{currentUser?.name.slice(0, 2).toUpperCase() ?? "AD"}</span><span><strong>{currentUser?.name ?? "Admin"}</strong><small>{currentUser?.profile.name ?? "Administrator"}</small></span><button aria-label="Sign out" onClick={() => void onSignOut()}>↗</button></div></div>
     </aside>
     <main className="main-canvas">
-      <header className="topbar"><div className="topbar-leading"><button ref={hamburgerRef} className="mobile-menu-button icon-button" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} aria-controls="app-sidebar" onClick={() => setMobileNavOpen((open) => !open)}><span /><span /><span /></button><div className="breadcrumb">Workspace <span>/</span> <strong>{activeNav}</strong></div></div><div className="topbar-actions"><NotificationBell authorization={apiAuthorization} userId={currentUser?.id} onOpenTicket={(id) => { setActiveNav("Tickets"); void fetch(`/api/v1/tickets/${id}`, { headers: apiHeaders }).then(async (response) => { if (response.ok) await selectTicket((await response.json()) as Ticket); else showToast("error", "That ticket is no longer available to you."); }); }} /><ProfileMenu user={currentUser} authorization={apiAuthorization} onSignOut={onSignOut} /></div></header>
+      <header className="topbar"><div className="topbar-leading"><button ref={hamburgerRef} className="mobile-menu-button icon-button" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileNavOpen} aria-controls="app-sidebar" onClick={() => setMobileNavOpen((open) => !open)}><span /><span /><span /></button><div className="breadcrumb">Workspace <span>/</span> <strong>{activeNav}</strong></div></div><div className="topbar-actions">
+          {!requesterAccess && (
+            <button
+              type="button"
+              className="sla-topbar-btn"
+              title="SLA Studio & Analytics"
+              aria-label="SLA Configuration Studio"
+              onClick={() => setSlaStudioOpen(true)}
+            >
+              <span>⏱️</span>
+              <span>SLA Studio</span>
+            </button>
+          )}<button type="button" className="theme-toggle-btn" title={`Switch to ${resolvedTheme === "dark" ? "light" : "dark"} mode`} aria-label="Toggle theme" onClick={onToggleTheme}>{resolvedTheme === "dark" ? "☀️" : "🌙"}</button><NotificationBell authorization={apiAuthorization} userId={currentUser?.id} fetchFn={authFetch} onOpenTicket={(id) => { setActiveNav("Tickets"); void authFetch(`/api/v1/tickets/${id}`).then(async (response) => { if (response.ok) await selectTicket((await response.json()) as Ticket); else showToast("error", "That ticket is no longer available to you."); }); }} /><ProfileMenu user={currentUser} authorization={apiAuthorization} onSignOut={onSignOut} /></div></header>
       <div className="page-content">
-        {activeNav === "Settings" ? <SettingsPanel currentUser={currentUser} adminToken={token} /> : activeNav === "Workflows" ? <WorkflowPanel token={token} /> : activeNav === "Approvals" ? <ApprovalsPanel token={token} currentUser={currentUser} /> : activeNav === "Overview" ? <OverviewPanel tickets={tickets} openCount={openCount} resolvedCount={resolvedCount} highPriorityCount={highPriorityCount} /> : activeNav === "People" ? <PeoplePanel currentUser={currentUser} requesters={requesters} agents={agents} view={peopleView} token={token} /> : activeNav === "Knowledge base" ? <KnowledgePanel categories={categories} /> : activeNav === "Reports" ? <ReportsPanel tickets={tickets} priorityOptions={priorityOptions} requester={requesterAccess} /> : <>
+        {activeNav === "Settings" ? <SettingsPanel currentUser={currentUser} adminToken={token} themeMode={themeMode} onThemeChange={onThemeChange} /> : activeNav === "Workflows" ? <WorkflowPanel token={token} /> : activeNav === "Approvals" ? <ApprovalsPanel token={token} currentUser={currentUser} /> : activeNav === "Change Calendar" ? <ChangeCalendarPanel tickets={tickets} onSelectTicket={selectTicket} authFetch={authFetch} onRefreshTickets={loadTickets} /> : activeNav === "Overview" ? <OverviewPanel tickets={tickets} openCount={openCount} resolvedCount={resolvedCount} highPriorityCount={highPriorityCount} analytics={analytics} onRefresh={loadAnalytics} /> : activeNav === "People" ? <PeoplePanel currentUser={currentUser} requesters={requesters} agents={agents} view={peopleView} token={token} /> : activeNav === "Reports" ? <ReportsPanel tickets={tickets} priorityOptions={priorityOptions} requester={requesterAccess} analytics={analytics} onRefresh={loadAnalytics} /> : <>
         <div className="page-heading"><div><p className="kicker">SERVICE OPERATIONS</p><h1>{activeNav === "Tickets" ? "Tickets" : activeNav}</h1><p className="subheading">{currentUser?.profile.interface === "self_service" ? "Report an incident or request a service, then track your tickets here." : queueAccess ? "Tickets assigned to you, your teams, or awaiting a technician." : "Manage, prioritize, and resolve requests across your organization."}</p></div><button className="primary-button" onClick={() => setShowCreate(true)}><span>+</span> Create ticket</button></div>
         <div className="metric-row"><div className="metric"><span className="metric-label">Open tickets</span><strong>{openCount}</strong><small className="metric-up">+12% <span>vs last week</span></small></div><div className="metric"><span className="metric-label">Awaiting response</span><strong>{tickets.filter((ticket) => ticket.status === "PENDING").length}</strong><small>Needs attention</small></div><div className="metric"><span className="metric-label">SLA compliance</span><strong>94.2%</strong><small className="metric-up">+2.4% <span>vs last month</span></small></div><div className="metric"><span className="metric-label">Avg. resolution</span><strong>6h 24m</strong><small>Across all tickets</small></div></div>
         <section className="table-card">
@@ -778,8 +1116,82 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
           </div>}
           <div className="team-counts" aria-label="Team ticket counts">{teamCounts.map((team) => <span className="team-count" key={team.team_id ?? "unassigned"}>Team {team.team_id ?? "Unassigned"} <b>{team.count}</b></span>)}</div>
           <div className="table-toolbar">
-            <div className="search-box"><Icon name="search" /><input value={query} aria-label="Search tickets" onChange={(event) => { setQuery(event.target.value); setListPage(1); }} placeholder="Search tickets by ID, title, or keyword" /></div>
+            <div className="search-box">
+              <Icon name="search" />
+              <input
+                ref={searchInputRef}
+                value={query}
+                aria-label="Search tickets"
+                onChange={(event) => { setQuery(event.target.value); setListPage(1); }}
+                placeholder="Search tickets by ID, title, or keyword (Press '/' to search)"
+              />
+            </div>
             <div className="toolbar-actions">
+              <Popover
+                wrapClassName="toolbar-menu-wrap"
+                triggerClassName="secondary-button"
+                panelClassName="view-options-popover"
+                ariaLabel="View & Display Options"
+                label={() => <><Icon name="settings" /><span>View</span></>}
+              >
+                {() => (
+                  <div className="view-options-panel">
+                    <div className="view-section">
+                      <span className="view-section-title">Sort by</span>
+                      <div className="view-row">
+                        <select value={listSort} onChange={(e) => { setListSort(e.target.value); setListPage(1); }}>
+                          <option value="opened_at">Opened date</option>
+                          <option value="priority">Priority</option>
+                          <option value="status">Status</option>
+                          <option value="title">Title</option>
+                          <option value="id">ID</option>
+                        </select>
+                        <button type="button" className="secondary-button" style={{ minWidth: 65 }} onClick={() => setListDirection((curr) => curr === "asc" ? "desc" : "asc")}>
+                          {listDirection === "asc" ? "↑ Asc" : "↓ Desc"}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="view-section">
+                      <span className="view-section-title">Page size</span>
+                      <select value={listPageSize} onChange={(e) => { setListPageSize(Number(e.target.value)); setListPage(1); }}>
+                        <option value="10">10 per page</option>
+                        <option value="25">25 per page</option>
+                        <option value="50">50 per page</option>
+                        <option value="100">100 per page</option>
+                      </select>
+                    </div>
+                    {!requesterAccess && (
+                      <div className="view-section">
+                        <span className="view-section-title">Saved views</span>
+                        <div className="view-row">
+                          <select value={activeListProfileId} onChange={(e) => applyListProfile(listProfiles.find((p) => String(p.id) === e.target.value))}>
+                            <option value="">Default queue view</option>
+                            {listProfiles.map((p) => <option key={p.id} value={p.id}>{p.name}{p.is_default ? " (default)" : ""}</option>)}
+                          </select>
+                          <button type="button" className="secondary-button" disabled={!activeListProfileId || listProfiles.find((p) => String(p.id) === activeListProfileId)?.is_default} onClick={() => void setDefaultListProfile()}>
+                            Default
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    <div className="view-section">
+                      <span className="view-section-title">Visible columns</span>
+                      <div className="view-columns-grid">
+                        {ticketListColumns.map(({ key, label }) => (
+                          <label key={key} className="view-column-check">
+                            <input
+                              type="checkbox"
+                              checked={listColumns.includes(key)}
+                              onChange={(e) => setListColumns((cols) => e.target.checked ? [...cols, key] : cols.length > 1 ? cols.filter((c) => c !== key) : cols)}
+                            />
+                            <span>{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </Popover>
               <Popover wrapClassName="toolbar-menu-wrap" triggerClassName="more-button" panelClassName="more-popover" ariaLabel="More ticket actions" label="•••">
                 {({ close }) => <><button type="button" role="menuitem" onClick={() => { close(); void loadTickets(); }}>Refresh tickets</button><button type="button" role="menuitem" onClick={() => { close(); clearFilters(); }}>Clear all filters</button></>}
               </Popover>
@@ -797,20 +1209,83 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
             onClearSearch={() => { setQuery(""); setListPage(1); }}
             onClearAll={clearFilters}
           />
-          <div className="list-controls"><label>Sort<select value={listSort} onChange={(event) => { setListSort(event.target.value); setListPage(1); }}><option value="opened_at">Opened</option><option value="priority">Priority</option><option value="status">Status</option><option value="title">Title</option></select></label><button className="sort-toggle" onClick={() => setListDirection((current) => current === "asc" ? "desc" : "asc")}>{listDirection === "asc" ? "Ascending" : "Descending"}</button><label>Page size<select value={listPageSize} onChange={(event) => { setListPageSize(Number(event.target.value)); setListPage(1); }}><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label></div>
-          <div className="profile-control-panel" aria-label="Saved ticket profiles">
-            <label>Saved profile<select value={activeListProfileId} onChange={(event) => applyListProfile(listProfiles.find((profile) => String(profile.id) === event.target.value))}><option value="">Current view</option>{listProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.kind === "filter" ? "Filter" : "Columns"} · {profile.name}{profile.is_default ? " (default)" : ""}</option>)}</select></label>
-            <button className="secondary-button" disabled={!activeListProfileId || listProfiles.find((profile) => String(profile.id) === activeListProfileId)?.is_default} onClick={() => void setDefaultListProfile()}>Set default</button>
-            <label>Save as<select value={profileSaveKind} onChange={(event) => setProfileSaveKind(event.target.value as "filter" | "column")}><option value="filter">Filter profile</option><option value="column">Column profile</option></select></label>
-            <label className="profile-name-field">Profile name<input value={profileName} maxLength={120} onChange={(event) => setProfileName(event.target.value)} placeholder="Name this view" /></label>
-            <button className="secondary-button" onClick={() => void saveListProfile()}>Save as</button>
-          </div>
           {assignmentMessage && <p className="success-message" role="status">{assignmentMessage}</p>}
-          <div className="profile-column-chooser"><strong>Choose columns</strong>{ticketListColumns.map(({ key, label }) => <label key={key}><input type="checkbox" checked={listColumns.includes(key)} onChange={(event) => setListColumns((columns) => event.target.checked ? [...columns, key] : columns.length > 1 ? columns.filter((column) => column !== key) : columns)} />{label}</label>)}</div>
           {error && <p className="error" role="alert">{error}</p>}
-          <div className="table-meta"><span><strong>{listTotal}</strong> tickets</span></div>
-          <div className="ticket-table-wrap"><table><thead><tr><th className="check-col"><input type="checkbox" aria-label="Select all tickets" /></th>{listColumns.map((column) => <th key={column}>{ticketListColumns.find((item) => item.key === column)?.label ?? column}</th>)}<th /></tr></thead><tbody>{tickets.map((ticket) => <tr key={ticket.id} className={selected?.id === ticket.id ? "row-selected" : ""} onClick={() => void selectTicket(ticket)}><td className="check-col" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ticket ${ticket.id}`} /></td>{listColumns.map((column) => <td key={column}>{renderTicketColumn(ticket, column)}</td>)}<td>{queueAccess && canSelfClaim && !ticket.assignee_id && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void claimTicket(ticket); }}>Claim</button>}{canAssignTickets && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void selectTicket(ticket); setAssignmentPickerTicketId(ticket.id); }}>Assign</button>}<button className="row-menu" onClick={(event) => event.stopPropagation()}>•••</button></td></tr>)}</tbody></table>{!tickets.length && !listLoading && <div className="empty-table"><strong>{queueAccess ? "No tickets in this queue" : "No tickets found"}</strong><span>{error ? "The list could not be loaded. Adjust the filters and try again." : "No tickets match the current filters. Remove a filter or use Clear all."}</span></div>}{listLoading && !tickets.length && <div className="empty-table" role="status"><strong>Loading tickets…</strong></div>}</div>
-          <div className="pagination-controls"><button disabled={listPage <= 1} onClick={() => setListPage((page) => page - 1)}>Previous</button><span>Page {listPage}</span><button disabled={listPage * listPageSize >= listTotal} onClick={() => setListPage((page) => page + 1)}>Next</button></div>
+          <div className="table-meta"><span><strong>{listTotal}</strong> {listTotal === 1 ? "ticket" : "tickets"}</span></div>
+          <div className="ticket-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th className="check-col"><input type="checkbox" aria-label="Select all tickets" /></th>
+                  {listColumns.map((column) => {
+                    const isSortable = ["id", "title", "status", "priority", "opened_at"].includes(column);
+                    return (
+                      <th
+                        key={column}
+                        className={isSortable ? `th-sortable ${listSort === column ? "th-sorted" : ""}` : ""}
+                        onClick={() => isSortable && handleHeaderSort(column)}
+                        title={isSortable ? `Click to sort by ${ticketListColumns.find((item) => item.key === column)?.label ?? column}` : undefined}
+                      >
+                        <span className="th-content">
+                          {ticketListColumns.find((item) => item.key === column)?.label ?? column}
+                          {isSortable && listSort === column && (
+                            <span className="sort-arrow">{listDirection === "asc" ? " ↑" : " ↓"}</span>
+                          )}
+                        </span>
+                      </th>
+                    );
+                  })}
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {tickets.map((ticket) => (
+                  <tr key={ticket.id} className={selected?.id === ticket.id ? "row-selected" : ""} onClick={() => void selectTicket(ticket)}>
+                    <td className="check-col" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ticket ${ticket.id}`} /></td>
+                    {listColumns.map((column) => <td key={column}>{renderTicketColumn(ticket, column)}</td>)}
+                    <td>
+                      {queueAccess && canSelfClaim && !ticket.assignee_id && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void claimTicket(ticket); }}>Claim</button>}
+                      {canAssignTickets && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); void selectTicket(ticket); setAssignmentPickerTicketId(ticket.id); }}>Assign</button>}
+                      <button className="row-menu" onClick={(event) => event.stopPropagation()}>•••</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!tickets.length && !listLoading && (
+              <div className="empty-table">
+                <strong>{queueAccess ? "No tickets in this queue" : "No tickets found"}</strong>
+                <span>{error ? "The list could not be loaded. Adjust the filters and try again." : "No tickets match the current filters. Remove a filter or use Clear all."}</span>
+              </div>
+            )}
+            {listLoading && !tickets.length && <div className="empty-table" role="status"><strong>Loading tickets…</strong></div>}
+          </div>
+          <div className="pagination-controls">
+            <span className="pagination-info">
+              Showing {listTotal > 0 ? (listPage - 1) * listPageSize + 1 : 0}–{Math.min(listPage * listPageSize, listTotal)} of {listTotal} tickets
+            </span>
+            <div className="pagination-actions">
+              <button
+                type="button"
+                className="secondary-button pagination-btn"
+                disabled={listPage <= 1}
+                onClick={() => setListPage((page) => Math.max(1, page - 1))}
+              >
+                Previous
+              </button>
+              <span className="pagination-page-badge">
+                Page {listPage} of {Math.max(1, Math.ceil(listTotal / listPageSize))}
+              </span>
+              <button
+                type="button"
+                className="secondary-button pagination-btn"
+                disabled={listPage * listPageSize >= listTotal}
+                onClick={() => setListPage((page) => page + 1)}
+              >
+                Next
+              </button>
+            </div>
+          </div>
         </section>
         </>}
       </div>
@@ -832,7 +1307,22 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         onAssigned={onTicketAssigned}
       /> : null;
     })()}
-    {showDrawer && selected && <aside className="detail-drawer"><div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details"><Icon name="close" /></button></div><div className="drawer-title"><h2>{selected.title}</h2><span className={`status status-${selected.status.toLowerCase()}`}><i />{selected.status_label ?? statusLabels[selected.status] ?? selected.status}</span>{queueAccess && canSelfClaim && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim ticket</button>}{canAssignTickets && <button className="primary-button assign-primary" onClick={() => setAssignmentPickerTicketId(selected.id)}>{selected.assignee_id ? "Reassign" : "Assign"}</button>}<TicketActionsMenu ticket={selected} authorization={apiAuthorization} canAssign={canAssignTickets} canUpdate={canUpdateTickets} staff={!requesterAccess} priorityOptions={priorityOptions} ticketTypes={ticketTypes} onAssign={() => setAssignmentPickerTicketId(selected.id)} onSuccess={async (message) => { showToast("success", message); await Promise.all([selectTicket(selected), loadTickets()]); }} onError={(message) => showToast("error", message)} /></div><div className="assignment-summary"><span>Raised by: <strong>{selected.requester_name ?? "Unknown"}</strong></span><span>Assigned to: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Type: <strong>{ticketTypes.find((item) => item.id === selected.ticket_type_id)?.name ?? "—"}</strong></span><span>Created: <strong>{new Date(selected.opened_at).toLocaleString()}</strong></span><span>Priority: <strong>{selected.priority_label ?? `Priority ${selected.priority}`}{requesterAccess ? "" : ` (${selected.priority})`}</strong></span>{!requesterAccess && <span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span>}</div><DrawerTabs tab={drawerTab} onChange={setDrawerTab} /><div className="drawer-content"><TabPanel tabId="details" tab={drawerTab}><TicketDetailsTab ticket={selected} authorization={apiAuthorization} staff={!requesterAccess} categories={categories} ticketTypes={ticketTypes} entityName={entityName} /></TabPanel><TabPanel tabId="activity" tab={drawerTab}><section className="drawer-section"><h3>Description</h3><SafeHtml className="ticket-description" html={selected.description} /></section><TicketAttachments ticketId={selected.id} headers={apiHeaders} /><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><ReplyComposer ticketId={selected.id} headers={apiHeaders} onSent={() => selectTicket(selected)} /><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>{selected.requester_name ?? "Unknown"}</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div>{!requesterAccess && <div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div>}</dl></section></TabPanel></div></aside>}
+    {showDrawer && selected && <aside className="detail-drawer">
+      <div className="drawer-header"><span className="kicker">TICKET #{selected.id}</span><button className="icon-button" onClick={() => setShowDrawer(false)} aria-label="Close details (Esc)"><Icon name="close" /></button></div>
+      <div className="drawer-title">
+        <div className="drawer-title-row">
+          <h2>{selected.title}</h2>
+          <span className={`status status-${selected.status.toLowerCase()}`}><i />{selected.status_label ?? statusLabels[selected.status] ?? selected.status}</span>
+        </div>
+        <div className="drawer-actions-toolbar">
+          {queueAccess && canSelfClaim && !selected.assignee_id && <button className="secondary-button" onClick={() => void claimTicket(selected)}>Claim</button>}
+          {canAssignTickets && <button className="primary-button assign-primary" onClick={() => setAssignmentPickerTicketId(selected.id)}>{selected.assignee_id ? "Reassign" : "Assign"}</button>}
+          {canUpdateTickets && (selected.status === "ASSIGNED" || selected.status === "PLANNED") && <><button className="secondary-button" title="Put ticket on hold (pauses SLA)" onClick={() => void quickUpdateStatus(selected, "PENDING")}>⏸ On hold</button><button className="secondary-button" title="Resolve ticket" onClick={() => void quickUpdateStatus(selected, "SOLVED")}>✓ Resolve</button></>}
+          {canUpdateTickets && selected.status === "PENDING" && <><button className="primary-button" style={{ background: "#0284c7" }} title="Resume active work (resumes SLA)" onClick={() => void quickUpdateStatus(selected, "ASSIGNED")}>▶ Resume</button><button className="secondary-button" title="Resolve ticket" onClick={() => void quickUpdateStatus(selected, "SOLVED")}>✓ Resolve</button></>}
+          {canUpdateTickets && selected.status === "SOLVED" && <><button className="secondary-button" title="Close ticket" onClick={() => void quickUpdateStatus(selected, "CLOSED")}>Close</button><button className="secondary-button" title="Reopen ticket" onClick={() => void quickUpdateStatus(selected, "ASSIGNED")}>Reopen</button></>}
+          <TicketActionsMenu ticket={selected} authorization={apiAuthorization} canAssign={canAssignTickets} canUpdate={canUpdateTickets} staff={!requesterAccess} priorityOptions={priorityOptions} ticketTypes={ticketTypes} onAssign={() => setAssignmentPickerTicketId(selected.id)} onSuccess={async (message) => { showToast("success", message); await Promise.all([selectTicket(selected), loadTickets()]); }} onError={(message) => showToast("error", message)} />
+        </div>
+      </div><div className="assignment-summary"><span>Raised by: <strong>{selected.requester_name ?? "Unknown"}</strong></span><span>Assigned to: <strong>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</strong></span><span>Type: <strong>{ticketTypes.find((item) => item.id === selected.ticket_type_id)?.name ?? "—"}</strong></span><span>Created: <strong>{new Date(selected.opened_at).toLocaleString()}</strong></span><span>Priority: <strong>{selected.priority_label ?? `Priority ${selected.priority}`}{requesterAccess ? "" : ` (${selected.priority})`}</strong></span>{!requesterAccess && <span>Team: <strong>{selected.team_name || "Unassigned"}</strong></span>}</div><DrawerTabs tab={drawerTab} onChange={setDrawerTab} /><div className="drawer-content"><TabPanel tabId="details" tab={drawerTab}><TicketDetailsTab ticket={selected} authorization={apiAuthorization} staff={!requesterAccess} categories={categories} ticketTypes={ticketTypes} entityName={entityName} onRefresh={() => selectTicket(selected)} /></TabPanel><TabPanel tabId="activity" tab={drawerTab}><section className="drawer-section"><h3>Description</h3><SafeHtml className="ticket-description" html={selected.description} /></section><TicketAttachments ticketId={selected.id} headers={apiHeaders} /><section className="drawer-section"><h3>Conversation</h3><div className="timeline">{timeline.map((item, index) => <article key={`${item.kind}-${index}`} className={item.is_private ? "private-note" : ""}><span className="timeline-dot" /><div className="timeline-head"><strong>{item.is_private ? "Internal note" : item.kind}</strong><time>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.body}</p></article>)}{!timeline.length && <p className="muted">No activity yet.</p>}</div></section><ReplyComposer ticketId={selected.id} headers={apiHeaders} onSent={() => selectTicket(selected)} /><section className="drawer-section metadata"><h3>Ticket details</h3><dl><div><dt>Requester</dt><dd>{selected.requester_name ?? "Unknown"}</dd></div><div><dt>Category</dt><dd>{selected.category_id ? `Category ${selected.category_id}` : "Uncategorized"}</dd></div><div><dt>Opened</dt><dd>{new Date(selected.opened_at).toLocaleDateString()}</dd></div><div><dt>Assignee</dt><dd>{selected.assignee_name || (selected.assignee_id ? `User #${selected.assignee_id}` : "Unassigned")}</dd></div>{!requesterAccess && <div><dt>Team</dt><dd>{selected.team_name || "Unassigned"}</dd></div>}</dl></section></TabPanel><TabPanel tabId="links" tab={drawerTab}><TicketLinksTab ticketId={selected.id} ticketTitle={selected.title} authorization={apiAuthorization} onRefreshTicket={() => selectTicket(selected)} showToast={showToast} /></TabPanel><TabPanel tabId="solutions" tab={drawerTab}><TicketSolutionsTab ticketId={selected.id} ticketTitle={selected.title} authorization={apiAuthorization} onRefreshTicket={() => selectTicket(selected)} showToast={showToast} /></TabPanel></div></aside>}
     <ToastRegion toast={toast} onDismiss={dismissToast} />
     {showCreate && (
       <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreate(); }}>
@@ -922,12 +1412,76 @@ function TicketWorkspace({ token, onSignOut }: { token: TokenPair; onSignOut: ()
         </form>
       </div>
     )}
-  </div>;
+        <SLAStudioModal
+        authorization={apiAuthorization}
+        isOpen={slaStudioOpen}
+        onClose={() => setSlaStudioOpen(false)}
+      />
+    </div>;
 }
 
-function OverviewPanel({ tickets, openCount, resolvedCount, highPriorityCount }: { tickets: Ticket[]; openCount: number; resolvedCount: number; highPriorityCount: number }) {
-  const statusCounts = tickets.reduce<Record<string, number>>((counts, ticket) => ({ ...counts, [ticket.status]: (counts[ticket.status] ?? 0) + 1 }), {});
-  return <section className="section-panel"><div className="page-heading"><div><p className="kicker">SERVICE OPERATIONS</p><h1>Workspace overview</h1><p className="subheading">Monitor service health and the work requiring attention.</p></div></div><div className="metric-row"><div className="metric"><span className="metric-label">Open tickets</span><strong>{openCount}</strong><small>Needs attention</small></div><div className="metric"><span className="metric-label">Resolved tickets</span><strong>{resolvedCount}</strong><small>Current workspace</small></div><div className="metric"><span className="metric-label">High priority</span><strong>{highPriorityCount}</strong><small>Priority 1 or 2</small></div><div className="metric"><span className="metric-label">Total requests</span><strong>{tickets.length}</strong><small>All visible tickets</small></div></div><div className="panel-grid"><section className="table-card panel-card"><div className="panel-card-heading"><h2>Ticket status</h2><span>Live queue</span></div>{Object.entries(statusCounts).map(([status, count]) => <div className="bar-row" key={status}><span>{statusLabels[status] ?? status}</span><b><i style={{ width: `${tickets.length ? Math.max(8, (count / tickets.length) * 100) : 0}%` }} /></b><strong>{count}</strong></div>)}</section><section className="table-card panel-card"><div className="panel-card-heading"><h2>Recent activity</h2><span>Latest requests</span></div>{tickets.slice(0, 5).map((ticket) => <div className="activity-row" key={ticket.id}><span className={`status status-${ticket.status.toLowerCase()}`}><i />#{ticket.id}</span><strong>{ticket.title}</strong><small>{ticket.status_label ?? statusLabels[ticket.status] ?? ticket.status}</small></div>)}</section></div></section>;
+function OverviewPanel({
+  tickets,
+  openCount,
+  resolvedCount,
+  highPriorityCount,
+  analytics,
+  onRefresh,
+}: {
+  tickets: Ticket[];
+  openCount: number;
+  resolvedCount: number;
+  highPriorityCount: number;
+  analytics?: AnalyticsOverview | null;
+  onRefresh?: () => void;
+}) {
+  const statusCounts = analytics?.status_counts
+    ?? tickets.reduce<Record<string, number>>((counts, ticket) => ({ ...counts, [ticket.status]: (counts[ticket.status] ?? 0) + 1 }), {});
+  const total = analytics?.total_tickets ?? tickets.length;
+  const open = analytics?.open_tickets ?? openCount;
+  const resolved = analytics?.resolved_tickets ?? resolvedCount;
+  const highPriority = analytics?.high_priority_tickets ?? highPriorityCount;
+
+  return (
+    <section className="section-panel">
+      <div className="page-heading">
+        <div>
+          <p className="kicker">SERVICE OPERATIONS</p>
+          <h1>Workspace overview</h1>
+          <p className="subheading">Monitor service health and the work requiring attention across the entire organization.</p>
+        </div>
+        {onRefresh && <button className="secondary-button" onClick={onRefresh}>Refresh analytics</button>}
+      </div>
+      <div className="metric-row">
+        <div className="metric"><span className="metric-label">Open tickets</span><strong>{open}</strong><small>Needs attention</small></div>
+        <div className="metric"><span className="metric-label">Resolved tickets</span><strong>{resolved}</strong><small>Current workspace</small></div>
+        <div className="metric"><span className="metric-label">High priority</span><strong>{highPriority}</strong><small>Priority 1 or 2</small></div>
+        <div className="metric"><span className="metric-label">Total requests</span><strong>{total}</strong><small>Database total</small></div>
+      </div>
+      <div className="panel-grid">
+        <section className="table-card panel-card">
+          <div className="panel-card-heading"><h2>Ticket status</h2><span>Live database distribution</span></div>
+          {Object.entries(statusCounts).map(([status, count]) => (
+            <div className="bar-row" key={status}>
+              <span>{statusLabels[status] ?? status}</span>
+              <b><i style={{ width: `${total ? Math.max(8, (count / total) * 100) : 0}%` }} /></b>
+              <strong>{count}</strong>
+            </div>
+          ))}
+        </section>
+        <section className="table-card panel-card">
+          <div className="panel-card-heading"><h2>Recent activity</h2><span>Latest requests</span></div>
+          {tickets.slice(0, 5).map((ticket) => (
+            <div className="activity-row" key={ticket.id}>
+              <span className={`status status-${ticket.status.toLowerCase()}`}><i />#{ticket.id}</span>
+              <strong>{ticket.title}</strong>
+              <small>{ticket.status_label ?? statusLabels[ticket.status] ?? ticket.status}</small>
+            </div>
+          ))}
+        </section>
+      </div>
+    </section>
+  );
 }
 
 function PeoplePanel({ currentUser, requesters, agents, view, token }: { currentUser: CurrentUser | null; requesters: Requester[]; agents: Requester[]; view: "all" | "technicians" | "requesters" | "users"; token: TokenPair }) {
@@ -939,11 +1493,19 @@ function PeoplePanel({ currentUser, requesters, agents, view, token }: { current
   return <section className="section-panel"><div className="page-heading"><div><p className="kicker">PEOPLE AND TEAMS</p><h1>People</h1><p className="subheading">Manage requesters and service desk participants in your workspace.</p></div></div><div className="table-card people-card">{currentUser?.profile.interface !== "helpdesk" ? <div className="empty-table"><strong>{currentUser?.name}</strong><span>Requester profile and ticket access are managed by your service desk.</span></div> : people.length ? people.map((person) => <div className="person-row" key={person.id}><span className="avatar avatar-indigo">{person.name.slice(0, 2).toUpperCase()}</span><div><strong>{person.name}</strong><small>{person.email}</small></div><span className="person-role">{agents.some((agent) => agent.id === person.id) ? "Technician" : "Requester"}</span></div>) : <div className="empty-table"><strong>No people found</strong><span>Active users in this entity will appear here.</span></div>}</div></section>;
 }
 
-function KnowledgePanel({ categories }: { categories: Category[] }) {
-  return <section className="section-panel"><div className="page-heading"><div><p className="kicker">SELF SERVICE</p><h1>Knowledge base</h1><p className="subheading">Give employees guided answers before they raise a request.</p></div><button className="secondary-button">Search articles</button></div><div className="knowledge-grid"><section className="table-card panel-card"><div className="panel-card-heading"><h2>Browse categories</h2><span>{categories.length} categories</span></div>{categories.length ? categories.map((category) => <div className="knowledge-row" key={category.id}><span className="avatar avatar-indigo"><Icon name="book" /></span><div><strong>{category.name}</strong><small>Service articles and known solutions</small></div><span>→</span></div>) : <div className="empty-table"><strong>No categories configured</strong><span>Administrators can add knowledge categories from Settings.</span></div>}</section><section className="knowledge-callout"><p className="kicker">QUICK HELP</p><h2>Find an answer faster</h2><p>Search for a known solution before creating a new ticket.</p><button className="primary-button">Browse solutions</button></section></div></section>;
-}
-
-function ReportsPanel({ tickets, priorityOptions, requester }: { tickets: Ticket[]; priorityOptions: PriorityOption[]; requester: boolean }) {
+function ReportsPanel({
+  tickets,
+  priorityOptions,
+  requester,
+  analytics,
+  onRefresh,
+}: {
+  tickets: Ticket[];
+  priorityOptions: PriorityOption[];
+  requester: boolean;
+  analytics?: AnalyticsOverview | null;
+  onRefresh?: () => void;
+}) {
   const priorities = requester
     ? [
       { label: "Critical", values: [1] },
@@ -952,13 +1514,59 @@ function ReportsPanel({ tickets, priorityOptions, requester }: { tickets: Ticket
       { label: "Low", values: [4, 5] },
     ]
     : priorityOptions.map(({ value, label }) => ({ label: `${label} (${value})`, values: [value] }));
-  return <section className="section-panel"><div className="page-heading"><div><p className="kicker">SERVICE ANALYTICS</p><h1>Reports</h1><p className="subheading">Understand volume, priority, and workload across visible tickets.</p></div><button className="secondary-button">Export report</button></div><div className="metric-row"><div className="metric"><span className="metric-label">Ticket volume</span><strong>{tickets.length}</strong><small>Visible tickets</small></div><div className="metric"><span className="metric-label">SLA due</span><strong>{tickets.filter((ticket) => ticket.ttr_due_at).length}</strong><small>Tickets with deadlines</small></div><div className="metric"><span className="metric-label">Unassigned</span><strong>{tickets.filter((ticket) => !ticket.assignee_id).length}</strong><small>Awaiting ownership</small></div><div className="metric"><span className="metric-label">Completion</span><strong>{tickets.length ? `${Math.round((tickets.filter((ticket) => ["SOLVED", "CLOSED"].includes(ticket.status)).length / tickets.length) * 100)}%` : "0%"}</strong><small>Solved or closed</small></div></div><section className="table-card report-card"><div className="panel-card-heading"><h2>Tickets by priority</h2><span>Current queue</span></div>{priorities.map(({ label, values }) => {
-    const count = tickets.filter((ticket) => values.includes(ticket.priority)).length;
-    return <div className="bar-row" key={label}><span>{label}</span><b><i style={{ width: `${tickets.length ? Math.max(count ? 8 : 0, (count / tickets.length) * 100) : 0}%` }} /></b><strong>{count}</strong></div>;
-  })}</section></section>;
+
+  const total = analytics?.total_tickets ?? tickets.length;
+  const resolved = analytics?.resolved_tickets ?? tickets.filter((t) => ["SOLVED", "CLOSED"].includes(t.status)).length;
+  const unassigned = analytics?.unassigned_tickets ?? tickets.filter((t) => !t.assignee_id).length;
+  const slaDue = analytics?.sla_due_tickets ?? tickets.filter((t) => t.ttr_due_at).length;
+  const completionRate = total ? Math.round((resolved / total) * 100) : 0;
+
+  return (
+    <section className="section-panel">
+      <div className="page-heading">
+        <div>
+          <p className="kicker">SERVICE ANALYTICS</p>
+          <h1>Reports</h1>
+          <p className="subheading">Understand volume, priority, and workload across all organization tickets.</p>
+        </div>
+        {onRefresh && <button className="secondary-button" onClick={onRefresh}>Refresh report</button>}
+      </div>
+      <div className="metric-row">
+        <div className="metric"><span className="metric-label">Ticket volume</span><strong>{total}</strong><small>Total in database</small></div>
+        <div className="metric"><span className="metric-label">SLA due</span><strong>{slaDue}</strong><small>Tickets with deadlines</small></div>
+        <div className="metric"><span className="metric-label">Unassigned</span><strong>{unassigned}</strong><small>Awaiting ownership</small></div>
+        <div className="metric"><span className="metric-label">Completion</span><strong>{completionRate}%</strong><small>Solved or closed</small></div>
+      </div>
+      <section className="table-card report-card">
+        <div className="panel-card-heading"><h2>Tickets by priority</h2><span>Database distribution</span></div>
+        {priorities.map(({ label, values }) => {
+          const count = analytics?.priority_counts
+            ? values.reduce((sum, v) => sum + (analytics.priority_counts[v] ?? 0), 0)
+            : tickets.filter((ticket) => values.includes(ticket.priority)).length;
+          return (
+            <div className="bar-row" key={label}>
+              <span>{label}</span>
+              <b><i style={{ width: `${total ? Math.max(count ? 8 : 0, (count / total) * 100) : 0}%` }} /></b>
+              <strong>{count}</strong>
+            </div>
+          );
+        })}
+      </section>
+    </section>
+  );
 }
 
-function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser | null; adminToken: TokenPair }) {
+function SettingsPanel({
+  currentUser,
+  adminToken,
+  themeMode,
+  onThemeChange,
+}: {
+  currentUser: CurrentUser | null;
+  adminToken: TokenPair;
+  themeMode?: ThemeMode;
+  onThemeChange?: (mode: ThemeMode) => void;
+}) {
   const [emailUpdates, setEmailUpdates] = useState(true);
   const [compactTables, setCompactTables] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -1083,7 +1691,7 @@ function SettingsPanel({ currentUser, adminToken }: { currentUser: CurrentUser |
     {saved && <p className="settings-saved" role="status">Settings saved.</p>}
     <div className="settings-grid">
       <section className="settings-card"><div className="settings-card-heading"><div><h2>Profile</h2><p>Account details for the signed-in workspace.</p></div><span className="avatar avatar-indigo">{currentUser?.name.slice(0, 2).toUpperCase() ?? "AD"}</span></div><dl className="settings-details"><div><dt>Name</dt><dd>{currentUser?.name ?? "Administrator"}</dd></div><div><dt>Email</dt><dd>{currentUser?.email ?? "Not available"}</dd></div><div><dt>Role</dt><dd>{currentUser?.profile.name ?? "Administrator"}</dd></div></dl></section>
-      <section className="settings-card"><div className="settings-card-heading"><div><h2>Preferences</h2><p>Choose how ServiceFlow works for you.</p></div></div><label className="settings-toggle"><span><strong>Email updates</strong><small>Receive updates about ticket activity.</small></span><input type="checkbox" checked={emailUpdates} onChange={(event) => setEmailUpdates(event.target.checked)} /></label><label className="settings-toggle"><span><strong>Compact tables</strong><small>Fit more tickets on each screen.</small></span><input type="checkbox" checked={compactTables} onChange={(event) => setCompactTables(event.target.checked)} /></label></section>
+      <section className="settings-card"><div className="settings-card-heading"><div><h2>Preferences</h2><p>Choose how ServiceFlow works for you.</p></div></div><label className="settings-toggle"><span><strong>Email updates</strong><small>Receive updates about ticket activity.</small></span><input type="checkbox" checked={emailUpdates} onChange={(event) => setEmailUpdates(event.target.checked)} /></label><label className="settings-toggle"><span><strong>Compact tables</strong><small>Fit more tickets on each screen.</small></span><input type="checkbox" checked={compactTables} onChange={(event) => setCompactTables(event.target.checked)} /></label>{onThemeChange && <label className="settings-toggle"><span><strong>Theme mode</strong><small>Choose between light, dark, or system default.</small></span><select className="settings-theme-select" value={themeMode ?? "system"} onChange={(event) => onThemeChange(event.target.value as ThemeMode)}><option value="system">System default</option><option value="light">Light</option><option value="dark">Dark</option></select></label>}</section>
     </div>
   </section>;
 }

@@ -22,17 +22,30 @@ class Settings(BaseSettings):
     mail_from: str = "no-reply@svcinfosys.in"
     app_base_url: str = "http://localhost:3000"
     invitation_ttl_hours: int = 24
+    invite_allowed_email_domains: str = ""
     debug: bool = False
     auth_rate_limit: int = 5
     auth_rate_window_seconds: int = 60
+    invite_rate_limit: int = 30
+    invite_rate_window_seconds: int = 3600
+    invite_accept_rate_limit: int = 10
+    invite_accept_rate_window_seconds: int = 900
     trusted_proxy_enabled: bool = False
     trusted_proxy_ips: str = ""
+    upload_root: str = "/app/data/documents"
+    s3_endpoint_url: str | None = None
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: SecretStr | None = None
+    s3_bucket: str | None = None
+    s3_region: str = "auto"
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=("../.env", ".env"), extra="ignore")
 
     @field_validator("database_url", mode="before")
     @classmethod
     def normalize_postgres_url(cls, value: str) -> str:
+        if value.startswith("sqlite"):
+            return value
         if value.startswith("postgres://"):
             return value.replace("postgres://", "postgresql+asyncpg://", 1)
         if value.startswith("postgresql://"):
@@ -63,6 +76,15 @@ class Settings(BaseSettings):
             raise ValueError("Authenticated SMTP requires STARTTLS or SSL")
         if self.invitation_ttl_hours < 1:
             raise ValueError("INVITATION_TTL_HOURS must be at least 1")
+        if min(
+            self.auth_rate_limit,
+            self.auth_rate_window_seconds,
+            self.invite_rate_limit,
+            self.invite_rate_window_seconds,
+            self.invite_accept_rate_limit,
+            self.invite_accept_rate_window_seconds,
+        ) < 1:
+            raise ValueError("Rate limits and rate windows must be positive")
         self.app_base_url = self.app_base_url.rstrip("/")
         return self
 
@@ -73,6 +95,14 @@ class Settings(BaseSettings):
     @property
     def trusted_proxy_ip_list(self) -> list[str]:
         return [item.strip() for item in self.trusted_proxy_ips.split(",") if item.strip()]
+
+    @property
+    def invite_allowed_email_domain_list(self) -> list[str]:
+        return [
+            domain.strip().casefold()
+            for domain in self.invite_allowed_email_domains.split(",")
+            if domain.strip()
+        ]
 
 
 @lru_cache

@@ -8,13 +8,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.elements import ColumnElement
 from app.deps import CurrentUser, DbSession, require_admin, require_helpdesk
 from app.models import AuditLog, BusinessRule, Category, Entity, Group, GroupMember, ListProfile, PriorityMatrix, Profile, SLA, Ticket, TicketActor, TicketDocument, TicketFollowup, TicketLink, TicketSolution, TicketTask, TicketTypeDefinition, TicketWorkflow, User, WorkflowApproval
-from app.schemas_tickets import ActorCreate, ActorRead, AssignableUserRead, CategoryCreate, CategoryRead, FollowupCreate, FollowupRead, GroupRead, LinkCreate, LinkRead, ListProfileCreate, ListProfileRead, ListProfileUpdate, RequesterRead, SolutionCreate, SolutionRead, TaskCreate, TaskRead, TicketAssignRequest, TicketAssignResult, TicketBulkResult, TicketBulkUpdate, TicketCreate, TicketListResponse, TicketRead, TicketUpdate
+from app.schemas_tickets import ActorCreate, ActorRead, AssignableUserRead, CascadeResolvePayload, CascadeResolveResult, CategoryCreate, CategoryRead, FollowupCreate, FollowupRead, GroupRead, KedbEntry, LinkCreate, LinkRead, ListProfileCreate, ListProfileRead, ListProfileUpdate, RequesterRead, SolutionCreate, SolutionRead, TaskCreate, TaskRead, TicketAssignRequest, TicketAssignResult, TicketBulkResult, TicketBulkUpdate, TicketCreate, TicketListResponse, TicketRead, TicketUpdate
 from app.services.automation import calculate_sla_deadlines, conditions_match
 from app.services.tickets import calculate_priority, priority_label, priority_options, priority_urgency_impact, requester_priority_value, transition_status
 from app.workers.tasks import send_ticket_notification
 from app.services.audit import record_audit
 from app.services.field_engine import REQUESTER_FORM_FIELDS, field_role_for_user, store_field_values, validate_custom_fields
-from app.services.content import rich_text_to_plain, sanitize_rich_text, sanitize_ticket_description
+from app.services.content import is_polite_acknowledgment, rich_text_to_plain, sanitize_rich_text, sanitize_ticket_description
 from app.services.attachments import can_see_private_items, live_followup_filter, visible_document_filter
 from app.services.bulk_tickets import apply_ticket_update, bulk_update_tickets as run_bulk_ticket_update, dispatch_ticket_update_effects
 from app.services.ticket_filters import (
@@ -129,6 +129,9 @@ async def get_scoped_ticket(ticket_id: int, user: User, db: DbSession) -> Ticket
 
 
 def ticket_response_data(ticket: Ticket, user: User) -> dict[str, Any]:
+    from datetime import UTC, datetime
+    from app.services.sla_engine import CLOSED_STATUSES, HOLD_STATUSES, as_utc
+
     data = {
         field: getattr(ticket, field)
         for field in TicketRead.model_fields
@@ -140,6 +143,33 @@ def ticket_response_data(ticket: Ticket, user: User) -> dict[str, Any]:
         ticket.priority,
         requester=field_role_for_user(user) == "Requester",
     )
+    now = datetime.now(UTC)
+    is_paused = (ticket.status or "").lower() in HOLD_STATUSES
+    is_closed = (ticket.status or "").upper() in CLOSED_STATUSES
+    tto_utc = as_utc(ticket.tto_due_at)
+    ttr_utc = as_utc(ticket.ttr_due_at)
+    res_breached = bool(ticket.breach_triggered or (ttr_utc and not is_closed and now > ttr_utc))
+    resp_breached = bool(ticket.response_breach_triggered or (tto_utc and not ticket.first_responded_at and not is_closed and now > tto_utc))
+
+    health = "breached" if res_breached else ("paused" if is_paused else ("warning_2" if ticket.warn2_triggered else ("warning_1" if ticket.warn1_triggered else "on_track")))
+
+    data["sla_paused"] = is_paused
+    data["priority_code"] = ticket.priority_code or f"P{ticket.priority}"
+    data["sla_state"] = {
+        "health": health,
+        "is_paused": is_paused,
+        "priority_code": ticket.priority_code or f"P{ticket.priority}",
+        "matched_tier": ticket.sla_matched_tier or "SITE_DEFAULT",
+        "matched_reason": ticket.sla_matched_reason,
+        "first_responded_at": ticket.first_responded_at.isoformat() if ticket.first_responded_at else None,
+        "response_breached": resp_breached,
+        "resolution_breached": res_breached,
+        "warn1_triggered": bool(ticket.warn1_triggered),
+        "warn2_triggered": bool(ticket.warn2_triggered),
+        "breach_triggered": res_breached,
+        "breach_code": ticket.breach_code,
+        "breach_reason": ticket.breach_reason,
+    }
     return data
 
 
@@ -515,6 +545,50 @@ async def ticket_queue_counts(
     return counts
 
 
+@router.get("/tickets/analytics/overview")
+async def ticket_analytics_overview(
+    user: CurrentUser,
+    db: DbSession,
+) -> dict[str, Any]:
+    """Return database-wide aggregate analytics for workspace overview and reports."""
+    scope = (Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None), ticket_visibility_scope(user))
+    
+    total_count = (await db.scalar(select(func.count(Ticket.id)).where(*scope))) or 0
+    
+    status_rows = (await db.execute(
+        select(Ticket.status, func.count(Ticket.id)).where(*scope).group_by(Ticket.status)
+    )).all()
+    status_counts = {st: count for st, count in status_rows}
+
+    priority_rows = (await db.execute(
+        select(Ticket.priority, func.count(Ticket.id)).where(*scope).group_by(Ticket.priority)
+    )).all()
+    priority_counts = {int(p): count for p, count in priority_rows}
+
+    open_count = sum(count for st, count in status_counts.items() if st not in ("SOLVED", "CLOSED"))
+    resolved_count = sum(count for st, count in status_counts.items() if st in ("SOLVED", "CLOSED"))
+    high_priority_count = priority_counts.get(1, 0) + priority_counts.get(2, 0)
+
+    unassigned_count = (await db.scalar(
+        select(func.count(Ticket.id)).where(*scope, Ticket.assignee_id.is_(None))
+    )) or 0
+
+    sla_due_count = (await db.scalar(
+        select(func.count(Ticket.id)).where(*scope, Ticket.ttr_due_at.is_not(None))
+    )) or 0
+
+    return {
+        "total_tickets": total_count,
+        "open_tickets": open_count,
+        "resolved_tickets": resolved_count,
+        "high_priority_tickets": high_priority_count,
+        "unassigned_tickets": unassigned_count,
+        "sla_due_tickets": sla_due_count,
+        "status_counts": status_counts,
+        "priority_counts": priority_counts,
+    }
+
+
 @router.get("/tickets/filter-options")
 async def ticket_filter_options(user: CurrentUser, db: DbSession) -> dict[str, Any]:
     options: dict[str, Any] = {
@@ -853,6 +927,8 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
     if sla:
         ticket.sla_id = sla.id
         calculate_sla_deadlines(ticket, sla.tto_minutes, sla.ttr_minutes, sla.calendar)
+    from app.services.sla_service import apply_initial_sla
+    await apply_initial_sla(ticket, db, requester_user=user if is_requester else None)
     rules = await db.scalars(select(BusinessRule).where(BusinessRule.entity_id == user.entity_id, BusinessRule.trigger == "ON_CREATE", BusinessRule.is_active.is_(True)).order_by(BusinessRule.order))
     assigned_group_id: int | None = None
     for rule in rules:
@@ -1084,6 +1160,38 @@ async def add_followup(ticket_id: int, payload: FollowupCreate, user: CurrentUse
         body = ""
     followup = TicketFollowup(ticket_id=ticket_id, author_id=user.id, body=body, is_private=payload.is_private)
     db.add(followup)
+
+    from app.services.sla_service import handle_first_response, handle_requester_reply_resume
+    if not payload.is_private:
+        resumed = await handle_requester_reply_resume(ticket, user, db)
+        if not resumed and user.id != ticket.requester_id:
+            await handle_first_response(ticket, user, db, is_private=payload.is_private)
+
+    # HaloITSM smart status behavior on customer reply
+    if not payload.is_private and ticket.status in ("SOLVED", "CLOSED"):
+        if is_polite_acknowledgment(body):
+            await record_audit(
+                db,
+                entity="ticket",
+                entity_id=ticket.id,
+                action="thank_you_acknowledged",
+                actor_id=user.id,
+                diff={"status": ticket.status, "note": "Polite acknowledgment received; ticket kept solved"},
+            )
+        else:
+            old_status = ticket.status
+            ticket.status = "ASSIGNED"
+            ticket.solved_at = None
+            ticket.closed_at = None
+            await record_audit(
+                db,
+                entity="ticket",
+                entity_id=ticket.id,
+                action="reopened",
+                actor_id=user.id,
+                diff={"status": ("ASSIGNED", old_status)},
+            )
+
     await db.commit()
     await db.refresh(followup)
     await record_audit(db, entity="ticket_followup", entity_id=followup.id, action="created", actor_id=user.id, diff={"ticket_id": ticket.id, "is_private": followup.is_private})
@@ -1167,9 +1275,111 @@ async def approve_solution(ticket_id: int, solution_id: int, user: CurrentUser, 
 
 
 @router.get("/tickets/{ticket_id}/links", response_model=list[LinkRead])
-async def list_links(ticket_id: int, user: CurrentUser, db: DbSession) -> list[TicketLink]:
+async def list_links(ticket_id: int, user: CurrentUser, db: DbSession) -> list[dict[str, Any]]:
     await scoped_ticket(ticket_id, user, db)
-    return list((await db.scalars(select(TicketLink).where(TicketLink.ticket_id == ticket_id).order_by(TicketLink.created_at))).all())
+    links = list((await db.scalars(select(TicketLink).where(TicketLink.ticket_id == ticket_id).order_by(TicketLink.created_at))).all())
+    results = []
+    for link in links:
+        linked_ticket = await db.scalar(select(Ticket).where(Ticket.id == link.linked_ticket_id))
+        results.append({
+            "id": link.id,
+            "ticket_id": link.ticket_id,
+            "linked_ticket_id": link.linked_ticket_id,
+            "link_type": link.link_type,
+            "created_at": link.created_at,
+            "linked_ticket_title": linked_ticket.title if linked_ticket else None,
+            "linked_ticket_status": linked_ticket.status if linked_ticket else None,
+        })
+    return results
+
+
+@router.delete("/tickets/{ticket_id}/links/{link_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_link(ticket_id: int, link_id: int, user: CurrentUser, db: DbSession) -> None:
+    require_helpdesk(user)
+    await scoped_ticket(ticket_id, user, db)
+    link = await db.scalar(select(TicketLink).where(TicketLink.id == link_id, TicketLink.ticket_id == ticket_id))
+    if link is None:
+        raise HTTPException(status_code=404, detail="Link not found")
+    await db.delete(link)
+    await record_audit(db, entity="ticket_link", entity_id=link_id, action="deleted", actor_id=user.id, diff={"ticket_id": ticket_id})
+    await db.commit()
+
+
+@router.post("/tickets/{ticket_id}/cascade-resolve", response_model=CascadeResolveResult)
+async def cascade_resolve_children(
+    ticket_id: int,
+    payload: CascadeResolvePayload,
+    user: CurrentUser,
+    db: DbSession,
+) -> dict[str, Any]:
+    require_helpdesk(user)
+    parent = await scoped_ticket(ticket_id, user, db)
+    links_from_parent = list((await db.scalars(
+        select(TicketLink).where(
+            TicketLink.ticket_id == parent.id,
+            TicketLink.link_type.in_(("CHILD", "PARENT")),
+        )
+    )).all())
+    links_to_parent = list((await db.scalars(
+        select(TicketLink).where(
+            TicketLink.linked_ticket_id == parent.id,
+            TicketLink.link_type.in_(("CHILD", "PARENT")),
+        )
+    )).all())
+    child_ids = (set([link.linked_ticket_id for link in links_from_parent] + [link.ticket_id for link in links_to_parent])) - {parent.id}
+    resolved_ids: list[int] = []
+    from datetime import UTC, datetime
+    now = datetime.now(UTC)
+
+    for cid in child_ids:
+        child = await db.scalar(select(Ticket).where(Ticket.id == cid, Ticket.entity_id == user.entity_id, Ticket.deleted_at.is_(None)))
+        if child and child.status not in ("SOLVED", "CLOSED"):
+            child.status = "SOLVED"
+            child.solved_at = child.solved_at or now
+            note_text = payload.note or f"Resolved via linked master Problem #{parent.id}."
+            db.add(TicketFollowup(ticket_id=child.id, author_id=user.id, body=f"✓ Cascade resolution: {note_text}", is_private=False))
+            await record_audit(db, entity="ticket", entity_id=child.id, action="cascade_resolved", actor_id=user.id, diff={"status": "SOLVED", "parent_id": parent.id})
+            resolved_ids.append(child.id)
+
+    await db.commit()
+    return {"resolved_count": len(resolved_ids), "child_ticket_ids": resolved_ids}
+
+
+@router.get("/kedb", response_model=list[KedbEntry])
+async def search_kedb(
+    user: CurrentUser,
+    db: DbSession,
+    q: str | None = Query(default=None, max_length=100),
+    solution_type: str | None = Query(default=None, max_length=40),
+) -> list[dict[str, Any]]:
+    query = (
+        select(TicketSolution, Ticket.title)
+        .join(Ticket, Ticket.id == TicketSolution.ticket_id)
+        .where(
+            Ticket.entity_id == user.entity_id,
+            Ticket.deleted_at.is_(None),
+        )
+        .order_by(TicketSolution.created_at.desc())
+    )
+    if solution_type:
+        query = query.where(TicketSolution.solution_type == solution_type)
+    if q:
+        query = query.where(
+            TicketSolution.body.ilike(f"%{q}%") | Ticket.title.ilike(f"%{q}%")
+        )
+    rows = (await db.execute(query.limit(50))).all()
+    return [
+        {
+            "id": sol.id,
+            "ticket_id": sol.ticket_id,
+            "ticket_title": title,
+            "solution_type": sol.solution_type,
+            "body": sol.body,
+            "status": sol.status,
+            "created_at": sol.created_at,
+        }
+        for sol, title in rows
+    ]
 
 
 @router.post("/tickets/{ticket_id}/links", response_model=LinkRead, status_code=status.HTTP_201_CREATED)

@@ -1,8 +1,10 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
+
+JSONB = PG_JSONB().with_variant(JSON(), "sqlite")
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -243,6 +245,7 @@ class Ticket(Base):
     urgency: Mapped[int] = mapped_column(Integer, default=3)
     impact: Mapped[int] = mapped_column(Integer, default=3)
     priority: Mapped[int] = mapped_column(Integer, default=3, index=True)
+    priority_code: Mapped[str | None] = mapped_column(String(10), nullable=True)  # P1, P2, P3, P4
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
     entity_id: Mapped[int] = mapped_column(ForeignKey("entities.id"), index=True)
     source: Mapped[str] = mapped_column(String(30), default="web")
@@ -251,9 +254,19 @@ class Ticket(Base):
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     solved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sla_effective_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tto_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     ttr_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     sla_id: Mapped[int | None] = mapped_column(ForeignKey("slas.id"), nullable=True)
+    sla_matched_tier: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    sla_matched_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    warn1_triggered: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    warn2_triggered: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    breach_triggered: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    response_breach_triggered: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    breach_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    breach_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     action_time_seconds: Mapped[int] = mapped_column(Integer, default=0)
     cost: Mapped[int] = mapped_column(Integer, default=0)
     custom_fields: Mapped[dict] = mapped_column(JSONB, default=dict)
@@ -265,6 +278,27 @@ class Ticket(Base):
     assignee: Mapped[User | None] = relationship(foreign_keys=[assignee_id])
     actors: Mapped[list["TicketActor"]] = relationship(cascade="all, delete-orphan")
     followups: Mapped[list["TicketFollowup"]] = relationship(cascade="all, delete-orphan")
+    hold_intervals: Mapped[list["SLAHoldInterval"]] = relationship(cascade="all, delete-orphan", order_by="SLAHoldInterval.start_time.asc()")
+
+    @property
+    def sla_paused(self) -> bool:
+        return self.status == TicketStatus.PENDING.value
+
+    @property
+    def paused_time_seconds(self) -> int:
+        return int((self.custom_fields or {}).get("paused_time_seconds") or 0)
+
+    @property
+    def allowed_transitions(self) -> list[str]:
+        transitions = {
+            TicketStatus.NEW.value: [TicketStatus.ASSIGNED.value, TicketStatus.PENDING.value],
+            TicketStatus.ASSIGNED.value: [TicketStatus.PLANNED.value, TicketStatus.PENDING.value, TicketStatus.SOLVED.value],
+            TicketStatus.PLANNED.value: [TicketStatus.ASSIGNED.value, TicketStatus.PENDING.value, TicketStatus.SOLVED.value],
+            TicketStatus.PENDING.value: [TicketStatus.ASSIGNED.value, TicketStatus.PLANNED.value, TicketStatus.SOLVED.value],
+            TicketStatus.SOLVED.value: [TicketStatus.ASSIGNED.value, TicketStatus.CLOSED.value],
+            TicketStatus.CLOSED.value: [TicketStatus.ASSIGNED.value],
+        }
+        return sorted(transitions.get(self.status, []))
 
 
 class TicketActor(Base):
@@ -335,15 +369,63 @@ class TicketLink(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class WorkdayCalendar(Base):
+    __tablename__ = "workday_calendars"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), unique=True)
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    is_24_7: Mapped[bool] = mapped_column(Boolean, default=False)
+    workdays: Mapped[list] = mapped_column(JSONB, default=lambda: [1, 2, 3, 4, 5])
+    start_time: Mapped[str] = mapped_column(String(10), default="09:00")
+    end_time: Mapped[str] = mapped_column(String(10), default="17:30")
+    breaks: Mapped[list] = mapped_column(JSONB, default=list)  # [{"name": "Lunch", "start": "12:00", "end": "13:00"}]
+    holidays: Mapped[list] = mapped_column(JSONB, default=list)  # ["2026-12-25", ...]
+    delayed_start_cutoff: Mapped[str | None] = mapped_column(String(10), nullable=True)  # e.g. "17:00"
+    entity_id: Mapped[int | None] = mapped_column(ForeignKey("entities.id"), nullable=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class SLA(Base):
     __tablename__ = "slas"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(160), unique=True)
     tto_minutes: Mapped[int] = mapped_column(Integer, default=60)
     ttr_minutes: Mapped[int] = mapped_column(Integer, default=480)
-    calendar: Mapped[dict] = mapped_column(JSONB, default=dict)
+    calendar_id: Mapped[int | None] = mapped_column(ForeignKey("workday_calendars.id"), nullable=True, index=True)
+    calendar: Mapped[dict] = mapped_column(JSONB, default=dict)  # Legacy fallback calendar dict
+    priorities_config: Mapped[dict] = mapped_column(JSONB, default=dict)  # {"P1": {"response_minutes": 15, "resolution_minutes": 120, "ola_minutes": 60}, ...}
+    warning1_pct: Mapped[int] = mapped_column(Integer, default=50)
+    warning2_pct: Mapped[int] = mapped_column(Integer, default=75)
+    auto_escalate_on_breach: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    require_breach_code: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    reset_response_on_user_reply: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    extend_to_eod: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     entity_id: Mapped[int] = mapped_column(ForeignKey("entities.id"), index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    calendar_rel: Mapped[WorkdayCalendar | None] = relationship()
+
+
+class SLAHoldInterval(Base):
+    __tablename__ = "sla_hold_intervals"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id", ondelete="CASCADE"), index=True)
+    reason: Mapped[str] = mapped_column(String(40), default="on_hold")  # awaiting_user, awaiting_vendor, awaiting_approval, on_hold
+    start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SLABreachCode(Base):
+    __tablename__ = "sla_breach_codes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    label: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class PriorityMatrix(Base):

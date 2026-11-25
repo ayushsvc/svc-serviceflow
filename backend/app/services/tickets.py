@@ -68,9 +68,9 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     TicketStatus.NEW.value: {TicketStatus.ASSIGNED.value, TicketStatus.PENDING.value},
     TicketStatus.ASSIGNED.value: {TicketStatus.PLANNED.value, TicketStatus.PENDING.value, TicketStatus.SOLVED.value},
     TicketStatus.PLANNED.value: {TicketStatus.ASSIGNED.value, TicketStatus.PENDING.value, TicketStatus.SOLVED.value},
-    TicketStatus.PENDING.value: {TicketStatus.ASSIGNED.value, TicketStatus.SOLVED.value},
+    TicketStatus.PENDING.value: {TicketStatus.ASSIGNED.value, TicketStatus.PLANNED.value, TicketStatus.SOLVED.value},
     TicketStatus.SOLVED.value: {TicketStatus.CLOSED.value, TicketStatus.ASSIGNED.value},
-    TicketStatus.CLOSED.value: set(),
+    TicketStatus.CLOSED.value: {TicketStatus.ASSIGNED.value},
 }
 
 

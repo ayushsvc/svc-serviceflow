@@ -1,4 +1,4 @@
-from app.models import TicketFollowup
+from app.models import TicketFollowup, TicketTask
 from tests.test_release1_part4 import act_as, make, part4  # noqa: F401
 
 
@@ -38,3 +38,37 @@ async def test_notifications_staff_see_internal_and_other_entities_never(part4):
     assert (await part4["client"].get("/api/v1/notifications")).json() == []
     act_as(part4, "B_requester")
     assert [item["summary"] for item in (await part4["client"].get("/api/v1/notifications")).json()] == ["Foreign reply"]
+
+
+async def test_requester_notifications_exclude_private_tasks_other_entities_and_own_actions(part4):
+    ticket_id = await make(part4, status="ASSIGNED", assignee="A_tech")
+    await _reply(part4, ticket_id, "A_tech", "Visible public reply")
+    await _reply(part4, ticket_id, "A_tech", "Private staff-only followup secret", private=True)
+    await _reply(part4, ticket_id, "A_requester", "Requester own action secret")
+    part4["db"].add(
+        TicketTask(
+            ticket_id=ticket_id,
+            assignee_id=part4["users"]["A_tech"].id,
+            body="Staff-only task secret",
+        )
+    )
+    foreign_ticket = await make(part4, entity="B", status="ASSIGNED", assignee="B_tech")
+    await _reply(part4, foreign_ticket, "B_tech", "Other entity secret")
+    await part4["db"].flush()
+
+    act_as(part4, "A_requester")
+    response = await part4["client"].get("/api/v1/notifications")
+
+    assert response.status_code == 200
+    items = response.json()
+    assert [item["summary"] for item in items] == ["Visible public reply"]
+    assert items[0]["ticket_id"] == ticket_id
+    assert not any(
+        secret in response.text
+        for secret in (
+            "Private staff-only followup secret",
+            "Staff-only task secret",
+            "Requester own action secret",
+            "Other entity secret",
+        )
+    )
