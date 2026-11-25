@@ -20,12 +20,15 @@ from app.models import (
     Group,
     GroupMember,
     NotificationTemplate,
+    PriorityMatrix,
     Profile,
     ProfileInterface,
     SLA,
+    SLABreachCode,
     TicketTypeDefinition,
     TicketTypeField,
     User,
+    WorkdayCalendar,
 )
 
 SLA_TARGETS = {
@@ -67,6 +70,24 @@ async def seed_entity_defaults(db: AsyncSession, entity: Entity) -> None:
         db.add(team)
         await db.flush()
 
+    calendar_name = f"{entity.name} Business Hours"
+    calendar = await db.scalar(select(WorkdayCalendar).where(WorkdayCalendar.name == calendar_name))
+    if calendar is None:
+        calendar = WorkdayCalendar(
+            name=calendar_name,
+            timezone="Asia/Kolkata",
+            is_24_7=False,
+            workdays=[1, 2, 3, 4, 5],
+            start_time="09:00",
+            end_time="17:00",
+            breaks=[{"name": "Lunch", "start": "13:00", "end": "14:00"}],
+            holidays=[],
+            entity_id=entity.id,
+            is_active=True,
+        )
+        db.add(calendar)
+        await db.flush()
+
     for priority, (tto_minutes, ttr_minutes) in SLA_TARGETS.items():
         name = f"{entity.name} Priority {priority} SLA"
         existing = await db.scalar(select(SLA).where(SLA.entity_id == entity.id, SLA.name == name))
@@ -77,9 +98,37 @@ async def seed_entity_defaults(db: AsyncSession, entity: Entity) -> None:
                     entity_id=entity.id,
                     tto_minutes=tto_minutes,
                     ttr_minutes=ttr_minutes,
+                    calendar_id=calendar.id,
                     calendar=BUSINESS_HOURS,
                 )
             )
+
+    standard_breach_codes = [
+        ("VENDOR_DELAY", "Vendor Delay", "3rd party hardware supplier or vendor delayed shipment/support."),
+        ("USER_DELAY", "User Awaiting Response", "User/Requester did not provide necessary information in time."),
+        ("PARTS_AWAITING", "Parts Awaiting", "Required replacement hardware or spare parts currently unavailable."),
+        ("COMPLEXITY_ESCALATION", "Complexity Escalation", "Issue root cause investigation required multi-team escalation."),
+        ("RESOURCE_CONSTRAINTS", "Capacity / Staffing Surge", "Incident volume surge exceeded operational capacity."),
+    ]
+    for b_code, b_label, b_desc in standard_breach_codes:
+        existing_bc = await db.scalar(select(SLABreachCode).where(SLABreachCode.code == b_code))
+        if existing_bc is None:
+            db.add(SLABreachCode(code=b_code, label=b_label, description=b_desc, is_active=True))
+
+    existing_pm = await db.scalar(select(PriorityMatrix).where(PriorityMatrix.entity_id == entity.id))
+    if existing_pm is None:
+        default_matrix = [
+            {"urgency": 1, "impact": 1, "priority": 1},
+            {"urgency": 1, "impact": 2, "priority": 1},
+            {"urgency": 1, "impact": 3, "priority": 2},
+            {"urgency": 2, "impact": 1, "priority": 1},
+            {"urgency": 2, "impact": 2, "priority": 2},
+            {"urgency": 2, "impact": 3, "priority": 3},
+            {"urgency": 3, "impact": 1, "priority": 2},
+            {"urgency": 3, "impact": 2, "priority": 3},
+            {"urgency": 3, "impact": 3, "priority": 4},
+        ]
+        db.add(PriorityMatrix(entity_id=entity.id, matrix=default_matrix, is_active=True))
 
     for event, subject, body in NOTIFICATION_TEMPLATES:
         existing = await db.scalar(
