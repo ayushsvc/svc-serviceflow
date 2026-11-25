@@ -47,9 +47,16 @@ class Settings(BaseSettings):
         if value.startswith("sqlite"):
             return value
         if value.startswith("postgres://"):
-            return value.replace("postgres://", "postgresql+asyncpg://", 1)
-        if value.startswith("postgresql://"):
-            return value.replace("postgresql://", "postgresql+asyncpg://", 1)
+            value = value.replace("postgres://", "postgresql+asyncpg://", 1)
+        elif value.startswith("postgresql://"):
+            value = value.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if "sslmode=" in value:
+            value = value.replace("sslmode=require", "ssl=require").replace("sslmode=prefer", "ssl=prefer").replace("sslmode=verify-ca", "ssl=require").replace("sslmode=verify-full", "ssl=require")
+        if "channel_binding=" in value:
+            import re
+            value = re.sub(r"[?&]channel_binding=[^&]*", "", value)
+            if "?" not in value and "&" in value:
+                value = value.replace("&", "?", 1)
         return value
 
     @model_validator(mode="before")
