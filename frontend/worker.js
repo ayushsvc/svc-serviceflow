@@ -14,6 +14,10 @@ export default {
       });
       return fetch(newRequest);
     }
-    return env.ASSETS.fetch(request);
+    const response = await env.ASSETS.fetch(request);
+    if (response.status === 404 && !url.pathname.includes(".")) {
+      return env.ASSETS.fetch(new Request(new URL("/", request.url), request));
+    }
+    return response;
   },
 };
