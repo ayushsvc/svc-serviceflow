@@ -2,3 +2,8 @@ name = "svc-serviceflow"
 compatibility_date = "2024-09-23"
 main = "worker.js"
 assets = { directory = "./out", binding = "ASSETS" }
+
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "61cfa86ef9de40a58711e74eadef4cfc"
+
