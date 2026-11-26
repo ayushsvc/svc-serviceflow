@@ -3,20 +3,18 @@ export default {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/api/v1/")) {
       try {
-        const targetUrl = new URL("http://127.0.0.1:8000" + url.pathname + url.search);
+        const backendOrigin = "https://svc-serviceflow-backend.onrender.com";
+        const targetUrl = backendOrigin + url.pathname + url.search;
         const headers = new Headers(request.headers);
-        headers.set("Host", "127.0.0.1:8000");
+        headers.set("Host", "svc-serviceflow-backend.onrender.com");
 
-        const proxyRequest = new Request(targetUrl.toString(), {
+        const proxyRequest = new Request(targetUrl, {
           method: request.method,
           headers: headers,
           body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
           redirect: "follow",
         });
 
-        if (env.BACKEND) {
-          return await env.BACKEND.fetch(proxyRequest);
-        }
         return await fetch(proxyRequest);
       } catch (err) {
         return new Response(
