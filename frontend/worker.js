@@ -1,4 +1,13 @@
 export default {
+  // Cloudflare Scheduled Cron Trigger: Runs every 10 mins to keep Render warm 24/7
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      fetch("https://svc-serviceflow-backend.onrender.com/health")
+        .then((res) => console.log("Render keep-alive ping status:", res.status))
+        .catch((err) => console.warn("Render keep-alive ping failed:", err))
+    );
+  },
+
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/api/v1/")) {
