@@ -7,3 +7,8 @@ assets = { directory = "./out", binding = "ASSETS" }
 binding = "HYPERDRIVE"
 id = "61cfa86ef9de40a58711e74eadef4cfc"
 
+[[vpc_services]]
+binding = "BACKEND"
+service_id = "01a2165c-3215-7940-8ae4-4646d71a4afd"
+
+
