@@ -885,7 +885,10 @@ async def create_ticket(payload: TicketCreate, user: CurrentUser, db: DbSession)
         priority = selected_priority
     else:
         matrix = await db.scalar(select(PriorityMatrix).where(PriorityMatrix.entity_id == user.entity_id))
-        priority = calculate_priority(urgency, impact) if matrix is None else matrix.matrix[urgency - 1][impact - 1]
+        if matrix is not None and isinstance(matrix.matrix, list) and len(matrix.matrix) >= urgency and isinstance(matrix.matrix[urgency - 1], list) and len(matrix.matrix[urgency - 1]) >= impact:
+            priority = matrix.matrix[urgency - 1][impact - 1]
+        else:
+            priority = calculate_priority(urgency, impact)
     ticket = Ticket(
         **payload.model_dump(
             exclude={"type", "sla_id", "requester_id", "ticket_type_id", "custom_fields", "priority", "urgency", "impact"}

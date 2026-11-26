@@ -222,7 +222,9 @@ export default function Home() {
       body: JSON.stringify({ email, password }),
     });
     if (!response.ok) {
-      setMessage("Invalid email or password.");
+      const err = await response.json().catch(() => null);
+      const detail = err && typeof err.detail === "string" ? err.detail : "";
+      setMessage(detail || (response.status === 401 ? "Invalid email or password." : `Login error (HTTP ${response.status}). Please check your connection or reload.`));
       return;
     }
     const pair = (await response.json()) as TokenPair;
@@ -979,7 +981,9 @@ function TicketWorkspace({
       }),
     });
     if (!response.ok) {
-      setCreateError("Enter a title and a description before submitting.");
+      const err = await response.json().catch(() => null);
+      const detail = err && typeof err.detail === "string" ? err.detail : (Array.isArray(err?.detail) ? err.detail.map((d: { msg?: string }) => d.msg).join(", ") : "");
+      setCreateError(detail || "Unable to submit ticket. Please check required fields and try again.");
       return;
     }
     if (draftKey) window.localStorage.removeItem(draftKey);
