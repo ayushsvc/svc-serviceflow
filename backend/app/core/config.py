@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     invite_accept_rate_window_seconds: int = 900
     trusted_proxy_enabled: bool = False
     trusted_proxy_ips: str = ""
-    upload_root: str = "/app/data/documents"
+    upload_root: str = "data/documents"
     s3_endpoint_url: str | None = None
     s3_access_key_id: str | None = None
     s3_secret_access_key: SecretStr | None = None

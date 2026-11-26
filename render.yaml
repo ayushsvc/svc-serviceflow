@@ -20,5 +20,7 @@ services:
         value: memory://
       - key: ENVIRONMENT
         value: production
+      - key: UPLOAD_ROOT
+        value: data/documents
       - key: CORS_ORIGINS
         value: http://localhost:3000,https://svc-serviceflow.ayush-8a3.workers.dev
