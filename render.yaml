@@ -10,6 +10,8 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
       - key: DATABASE_URL
         value: postgresql+asyncpg://neondb_owner:npg_uCiwcfSeM72X@ep-sweet-hat-bdz1ed5d-pooler.c-8.us-east-2.aws.neon.tech/neondb?ssl=require
       - key: JWT_SECRET
