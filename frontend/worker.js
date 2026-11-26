@@ -2,17 +2,21 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/api/v1/")) {
-      const backendUrl = "https://volume-shipping-robin-extended.trycloudflare.com" + url.pathname + url.search;
+      const targetUrl = new URL("http://127.0.0.1:8000" + url.pathname + url.search);
       const headers = new Headers(request.headers);
-      headers.set("Host", "volume-shipping-robin-extended.trycloudflare.com");
+      headers.set("Host", "127.0.0.1:8000");
 
-      const newRequest = new Request(backendUrl, {
+      const proxyRequest = new Request(targetUrl, {
         method: request.method,
         headers: headers,
         body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
         redirect: "follow",
       });
-      return fetch(newRequest);
+
+      if (env.BACKEND) {
+        return env.BACKEND.fetch(proxyRequest);
+      }
+      return fetch(proxyRequest);
     }
     const response = await env.ASSETS.fetch(request);
     if (response.status === 404 && !url.pathname.includes(".")) {
