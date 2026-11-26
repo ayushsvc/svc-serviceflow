@@ -1,95 +1,22 @@
-envVarGroups:
-  - name: svc-serviceflow-production
+services:
+  - type: web
+    name: svc-serviceflow-backend
+    runtime: python
+    region: oregon
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
     envVars:
+      - key: DATABASE_URL
+        value: postgresql+asyncpg://neondb_owner:npg_uCiwcfSeM72X@ep-sweet-hat-bdz1ed5d-pooler.c-8.us-east-2.aws.neon.tech/neondb?ssl=require
+      - key: JWT_SECRET
+        value: local-development-secret-change-this-2026-svc-infosystems
+      - key: REDIS_URL
+        value: memory://
       - key: ENVIRONMENT
         value: production
-      - key: DEBUG
-        value: "false"
-      - key: JWT_SECRET
-        generateValue: true
       - key: CORS_ORIGINS
-        sync: false
-      - key: APP_BASE_URL
-        sync: false
-      - key: INVITATION_TTL_HOURS
-        value: "24"
-      - key: INVITE_ALLOWED_EMAIL_DOMAINS
-        sync: false
-      - key: INVITE_RATE_LIMIT
-        value: "30"
-      - key: INVITE_RATE_WINDOW_SECONDS
-        value: "3600"
-      - key: INVITE_ACCEPT_RATE_LIMIT
-        value: "10"
-      - key: INVITE_ACCEPT_RATE_WINDOW_SECONDS
-        value: "900"
-      - key: SMTP_HOST
-        value: smtp-relay.brevo.com
-      - key: SMTP_PORT
-        value: "587"
-      - key: SMTP_USERNAME
-        sync: false
-      - key: SMTP_PASSWORD
-        sync: false
-      - key: SMTP_STARTTLS
-        value: "true"
-      - key: SMTP_USE_SSL
-        value: "false"
-      - key: MAIL_FROM
-        sync: false
-
-services:
-  - type: pserv
-    name: svc-serviceflow-api
-    runtime: docker
-    region: oregon
-    plan: starter
-    autoDeploy: false
-    healthCheckPath: /health
-    preDeployCommand: alembic upgrade head
-    dockerContext: .
-    dockerfilePath: ./backend/Dockerfile
-    startCommand: >-
-      sh -c "python -m app.seed --production &&
-      uvicorn app.main:app --host 0.0.0.0 --port 8000"
-    disk:
-      name: svc-serviceflow-uploads
-      mountPath: /app/data/documents
-      sizeGB: 10
-    envVars:
-      - fromGroup: svc-serviceflow-production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: svc-serviceflow-db
-          property: connectionString
-      - key: REDIS_URL
-        value: "memory://"
-      - key: SEED_ADMIN_EMAIL
-        sync: false
-      - key: SEED_ADMIN_NAME
-        sync: false
-      - key: SEED_ADMIN_PASSWORD
-        sync: false
-
-  - type: web
-    name: svc-serviceflow-web
-    runtime: docker
-    region: oregon
-    plan: starter
-    autoDeploy: false
-    healthCheckPath: /
-    dockerContext: .
-    dockerfilePath: ./frontend/Dockerfile
-    envVars:
-      - key: API_INTERNAL_HOSTPORT
-        fromService:
-          type: pserv
-          name: svc-serviceflow-api
-          property: hostport
-
-databases:
-  - name: svc-serviceflow-db
-    region: oregon
-    plan: basic-256mb
-    databaseName: svc_serviceflow
-    user: svc_serviceflow
+        value: http://localhost:3000,https://svc-serviceflow.ayush-8a3.workers.dev
