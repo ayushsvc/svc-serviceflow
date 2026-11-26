@@ -118,15 +118,11 @@ async def seed_entity_defaults(db: AsyncSession, entity: Entity) -> None:
     existing_pm = await db.scalar(select(PriorityMatrix).where(PriorityMatrix.entity_id == entity.id))
     if existing_pm is None:
         default_matrix = [
-            {"urgency": 1, "impact": 1, "priority": 1},
-            {"urgency": 1, "impact": 2, "priority": 1},
-            {"urgency": 1, "impact": 3, "priority": 2},
-            {"urgency": 2, "impact": 1, "priority": 1},
-            {"urgency": 2, "impact": 2, "priority": 2},
-            {"urgency": 2, "impact": 3, "priority": 3},
-            {"urgency": 3, "impact": 1, "priority": 2},
-            {"urgency": 3, "impact": 2, "priority": 3},
-            {"urgency": 3, "impact": 3, "priority": 4},
+            [1, 1, 2, 2, 3],
+            [1, 2, 2, 3, 3],
+            [2, 2, 3, 3, 4],
+            [2, 3, 3, 4, 5],
+            [3, 3, 4, 5, 5],
         ]
         db.add(PriorityMatrix(entity_id=entity.id, matrix=default_matrix, is_active=True))
 
