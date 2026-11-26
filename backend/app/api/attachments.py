@@ -32,7 +32,28 @@ from app.workers.tasks import send_ticket_notification
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["attachments"])
-UPLOAD_ROOT = Path(os.environ.get("UPLOAD_ROOT") or getattr(get_settings(), "upload_root", "/app/data/documents"))
+def _resolve_upload_root() -> Path:
+    env_path = os.environ.get("UPLOAD_ROOT")
+    if env_path and env_path != "/app/data/documents":
+        target = Path(env_path)
+    else:
+        configured = getattr(get_settings(), "upload_root", "data/documents")
+        if configured == "/app/data/documents":
+            configured = "data/documents"
+        target = Path(configured)
+        if not target.is_absolute():
+            target = (Path.cwd() / target).resolve()
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+    except (PermissionError, OSError):
+        import tempfile
+        fallback = (Path(tempfile.gettempdir()) / "svc_documents").resolve()
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+UPLOAD_ROOT = _resolve_upload_root()
 PROTECTIVE_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Content-Security-Policy": "default-src 'none'; sandbox",
@@ -54,13 +75,15 @@ def locate_stored_file(document: TicketDocument) -> tuple[Path | None, str]:
     root = UPLOAD_ROOT.resolve()
     try:
         path = Path(document.path).resolve()
-        if root not in path.parents:
+        import tempfile
+        temp_root = (Path(tempfile.gettempdir()) / "svc_documents").resolve()
+        if root not in path.parents and temp_root not in path.parents:
             return None, "outside"
         if not path.is_file():
             return None, "missing"
+        return path, "ok"
     except (OSError, ValueError):
         return None, "missing"
-    return path, "ok"
 
 
 def stored_size(document: TicketDocument) -> int | None:
@@ -146,7 +169,10 @@ async def upload_document(
         raise HTTPException(status_code=422, detail=limit_message(user))
     first_for_reply = followup is not None and await live_document_count(db, ticket.id, followup_id=followup.id) == 0
 
-    UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+    except (PermissionError, OSError):
+        pass
     path = UPLOAD_ROOT / f"{uuid4().hex}{validated.extension}"
     path.write_bytes(content)
     try:

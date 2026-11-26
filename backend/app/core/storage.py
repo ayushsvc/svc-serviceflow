@@ -31,10 +31,21 @@ class StorageBackend:
 
 class LocalStorageBackend(StorageBackend):
     def __init__(self, root: str | Path | None = None) -> None:
-        if root is None:
-            root = getattr(get_settings(), "upload_root", "/app/data/documents")
-        self.root = Path(root).resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+        if root is None or str(root) == "/app/data/documents":
+            root = os.environ.get("UPLOAD_ROOT") or getattr(get_settings(), "upload_root", "data/documents")
+            if str(root) == "/app/data/documents":
+                root = "data/documents"
+        target = Path(root)
+        if not target.is_absolute():
+            target = (Path.cwd() / target).resolve()
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            self.root = target.resolve()
+        except (PermissionError, OSError):
+            import tempfile
+            fallback = (Path(tempfile.gettempdir()) / "svc_documents").resolve()
+            fallback.mkdir(parents=True, exist_ok=True)
+            self.root = fallback
 
     def _resolve(self, relative_path: str) -> Path | None:
         try:
@@ -160,7 +171,9 @@ def get_storage() -> StorageBackend:
             region=getattr(settings, "s3_region", "auto"),
         )
     else:
-        upload_root = os.environ.get("UPLOAD_ROOT") or getattr(settings, "upload_root", "/app/data/documents")
+        upload_root = os.environ.get("UPLOAD_ROOT") or getattr(settings, "upload_root", "data/documents")
+        if upload_root == "/app/data/documents":
+            upload_root = "data/documents"
         _storage = LocalStorageBackend(root=upload_root)
 
     return _storage
