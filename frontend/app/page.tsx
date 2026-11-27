@@ -268,28 +268,62 @@ export default function Home() {
   if (token) return <TicketWorkspace token={token} onSignOut={signOut} onTokenUpdated={setToken} themeMode={themeMode} resolvedTheme={resolvedTheme} onThemeChange={handleThemeChange} onToggleTheme={toggleTheme} />;
 
   return (
-    <main className="login-page login-page-centered">
-      <div className="login-top-bar">
-        <button
-          type="button"
-          className="theme-toggle-btn"
-          onClick={toggleTheme}
-          title={`Switch to ${resolvedTheme === "dark" ? "light" : "dark"} mode`}
-          aria-label="Toggle theme"
-        >
-          {resolvedTheme === "dark" ? <><Icon name="sun" /> Light</> : <><Icon name="moon" /> Dark</>}
-        </button>
-      </div>
-
-      <div className="centered-login-container">
-        <div className="centered-login-brand">
+    <main className="login-page">
+      <section className="login-panel">
+        <div className="login-brand">
           <img src="/svc-logo.png" alt="SVC Infosystems" />
           <span>SVC ServiceFlow</span>
           <span className="login-brand-badge">ITSM v1.0</span>
         </div>
-
+        <div className="login-copy">
+          <p className="kicker">High-velocity IT Operations</p>
+          <h1>Request to Resolution</h1>
+          <p>One focused workspace for technicians, employees, and IT leadership.</p>
+          <div className="preview-ticket-card">
+            <div className="preview-card-head">
+              <span className="preview-ticket-id">
+                <span className="font-mono">INCIDENT · #0039</span>
+              </span>
+              <span className="preview-p1-badge">P1 HIGH</span>
+            </div>
+            <div className="preview-card-body">
+              <h3>ERP Database Gateway Timeout</h3>
+              <div className="preview-telemetry-row">
+                <span className="preview-sla-target">
+                  <span className="preview-sla-dot" aria-hidden="true" />
+                  2h 14m remaining
+                </span>
+                <span className="preview-assignee">
+                  <span>Assigned · Infrastructure Tier 2</span>
+                </span>
+              </div>
+            </div>
+            <div className="preview-card-footer">
+              <span>Diagnostic bundle received</span>
+              <span className="font-mono">14m ago</span>
+            </div>
+          </div>
+        </div>
+        <div className="login-footer">
+          <span>Enterprise Service Desk</span>
+          <span className="font-mono">v1.0.4</span>
+        </div>
+      </section>
+      <section className="login-form-wrap" style={{ position: "relative" }}>
+        <div style={{ position: "absolute", top: 24, right: 32 }}>
+          <button
+            type="button"
+            className="theme-toggle-btn"
+            onClick={toggleTheme}
+            title={`Switch to ${resolvedTheme === "dark" ? "light" : "dark"} mode`}
+            aria-label="Toggle theme"
+          >
+            {resolvedTheme === "dark" ? <><Icon name="sun" /> Light</> : <><Icon name="moon" /> Dark</>}
+          </button>
+        </div>
         <div className="login-form-card">
           <form className="login-form" onSubmit={login}>
+            <div className="mobile-brand"><img src="/svc-logo.png" alt="SVC Infosystems" /><strong>SVC ServiceFlow</strong></div>
             <p className="kicker">Service Operations</p>
             <h2>Sign in to ServiceFlow</h2>
             <p className="form-help">Use your work account to continue.</p>
@@ -303,13 +337,7 @@ export default function Home() {
             {message && <p className={accountActivated ? "settings-saved" : "error"} role={accountActivated ? "status" : "alert"}>{message}</p>}
           </form>
         </div>
-
-        <div className="centered-login-footer">
-          <span>Enterprise Service Desk</span>
-          <span className="footer-dot">·</span>
-          <span className="font-mono">v1.0.4</span>
-        </div>
-      </div>
+      </section>
     </main>
   );
 }
