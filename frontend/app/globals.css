@@ -156,22 +156,27 @@ input:-webkit-autofill:active {
   padding: 48px clamp(32px, 6vw, 72px);
 }
 .login-brand {
-  align-items: center;
+  align-items: flex-start;
   display: flex;
-  flex-direction: row;
-  gap: 12px;
+  flex-direction: column;
+  gap: 16px;
 }
 .login-brand img {
-  height: 38px;
-  width: auto;
+  width: clamp(140px, 12vw, 180px);
+  height: auto;
   object-fit: contain;
   flex-shrink: 0;
   display: block;
 }
+.login-brand-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .login-brand span {
-  font-size: 18px;
+  font-size: clamp(20px, 1.6vw, 24px);
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
   color: var(--ink);
   line-height: 1.2;
 }
@@ -184,7 +189,6 @@ input:-webkit-autofill:active {
   background: var(--surface-hover);
   color: var(--muted);
   border: 1px solid var(--line);
-  margin-left: 4px;
 }
 .mobile-brand img {
   width: 120px;

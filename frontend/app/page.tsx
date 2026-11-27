@@ -272,8 +272,10 @@ export default function Home() {
       <section className="login-panel">
         <div className="login-brand">
           <img src="/svc-logo.png" alt="SVC Infosystems" />
-          <span>SVC ServiceFlow</span>
-          <span className="login-brand-badge">ITSM v1.0</span>
+          <div className="login-brand-title">
+            <span>SVC ServiceFlow</span>
+            <span className="login-brand-badge">ITSM v1.0</span>
+          </div>
         </div>
         <div className="login-copy">
           <p className="kicker">High-velocity IT Operations</p>
