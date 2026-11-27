@@ -69,24 +69,12 @@ export default function SLALiveBadge({ dueAt, solvedAt, isPaused, health: initia
   const calc = formatTimeRemaining(dueAt, solvedAt, isPaused);
   const effectiveStatus = initialHealth && initialHealth !== "on_track" ? initialHealth : calc.status;
 
-  const iconMap: Record<string, string> = {
-    on_track: "⏱",
-    warning_1: "⚡",
-    warning_2: "⚠️",
-    breached: "✕",
-    paused: "⏸",
-    met: "✓",
-    none: "—",
-  };
-
-  const icon = iconMap[effectiveStatus] || "⏱";
-
   return (
     <span
-      className={`sla-live-badge sla-${effectiveStatus}`}
+      className={`sla-live-badge sla-${effectiveStatus} font-mono`}
       title={`SLA Target: ${dueAt ? new Date(dueAt).toLocaleString() : "Not set"}`}
     >
-      {showIcon && <span>{icon}</span>}
+      {showIcon && <span className={`sla-dot sla-dot-${effectiveStatus}`} aria-hidden="true" />}
       <span>{calc.text}</span>
     </span>
   );

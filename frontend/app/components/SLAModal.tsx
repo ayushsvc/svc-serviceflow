@@ -87,7 +87,11 @@ export default function SLAModal({ ticketId, targetStatus, authorization, isOpen
       <div className="sla-breach-dialog">
         <div className="sla-breach-header">
           <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <span style={{ fontSize: "20px" }}>⚠️</span>
+            <svg viewBox="0 0 24 24" className="icon" fill="none" stroke="var(--danger)" strokeWidth="1.5" style={{ width: 22, height: 22, flexShrink: 0 }}>
+              <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
             <div>
               <h2 id="sla-modal-title">Resolution SLA Breached</h2>
               <p>Mandatory justification required to set Ticket #{ticketId} to {targetStatus}</p>
@@ -99,9 +103,10 @@ export default function SLAModal({ ticketId, targetStatus, authorization, isOpen
             onClick={onClose}
             disabled={submitting}
             aria-label="Close"
-            style={{ fontSize: "16px" }}
           >
-            ✕
+            <svg viewBox="0 0 24 24" className="icon" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ width: 16, height: 16 }}>
+              <path d="m6 6 12 12M18 6 6 18" />
+            </svg>
           </button>
         </div>
 
