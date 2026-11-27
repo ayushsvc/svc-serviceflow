@@ -279,30 +279,6 @@ export default function Home() {
           <p className="kicker">High-velocity IT Operations</p>
           <h1>Request to Resolution</h1>
           <p>One focused workspace for technicians, employees, and IT leadership.</p>
-          <div className="preview-ticket-card">
-            <div className="preview-card-head">
-              <span className="preview-ticket-id">
-                <span className="font-mono">INCIDENT · #0039</span>
-              </span>
-              <span className="preview-p1-badge">P1 HIGH</span>
-            </div>
-            <div className="preview-card-body">
-              <h3>ERP Database Gateway Timeout</h3>
-              <div className="preview-telemetry-row">
-                <span className="preview-sla-target">
-                  <span className="preview-sla-dot" aria-hidden="true" />
-                  2h 14m remaining
-                </span>
-                <span className="preview-assignee">
-                  <span>Assigned · Infrastructure Tier 2</span>
-                </span>
-              </div>
-            </div>
-            <div className="preview-card-footer">
-              <span>Diagnostic bundle received</span>
-              <span className="font-mono">14m ago</span>
-            </div>
-          </div>
         </div>
         <div className="login-footer">
           <span>Enterprise Service Desk</span>
