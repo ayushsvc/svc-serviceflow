@@ -128,39 +128,63 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 .muted { color: var(--muted); }
 
+/* Dark/Light mode autofill override to prevent white input glow */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active {
+  -webkit-text-fill-color: var(--input-text) !important;
+  -webkit-box-shadow: 0 0 0px 1000px var(--input-bg) inset !important;
+  box-shadow: 0 0 0px 1000px var(--input-bg) inset !important;
+  transition: background-color 5000s ease-in-out 0s;
+}
+
 /* Authentication */
 .login-page {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
   min-height: 100vh;
-  background: var(--surface);
+  background: var(--canvas);
 }
 .login-panel {
-  background: #18181b;
-  color: #fff;
+  background: var(--surface-subtle);
+  border-right: 1px solid var(--line);
+  color: var(--ink);
   display: flex;
   flex-direction: column;
-  padding: 40px clamp(40px, 8vw, 128px);
+  justify-content: space-between;
+  padding: 48px clamp(32px, 6vw, 72px);
 }
 .login-brand {
-  align-items: flex-start;
+  align-items: center;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 12px;
 }
 .login-brand img {
-  width: clamp(140px, 12vw, 175px);
-  height: auto;
+  height: 38px;
+  width: auto;
   object-fit: contain;
   flex-shrink: 0;
   display: block;
 }
 .login-brand span {
-  font-size: clamp(20px, 1.5vw, 24px);
+  font-size: 18px;
   font-weight: 600;
-  letter-spacing: -0.025em;
-  color: #fff;
+  letter-spacing: -0.01em;
+  color: var(--ink);
   line-height: 1.2;
+}
+.login-brand-badge {
+  font-family: "Geist Mono", "IBM Plex Mono", monospace;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface-hover);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  margin-left: 4px;
 }
 .mobile-brand img {
   width: 120px;
@@ -169,7 +193,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   flex-shrink: 0;
   display: block;
 }
-.login-copy { margin: auto 0; max-width: 440px; }
+.login-copy { margin: 36px 0; max-width: 480px; }
 .login-copy .kicker {
   color: var(--muted);
   font-size: 12px;
@@ -179,39 +203,137 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   text-transform: none;
 }
 .login-copy h1 {
-  font-size: clamp(36px, 4vw, 60px);
+  font-size: clamp(32px, 3.2vw, 44px);
+  font-weight: 600;
   letter-spacing: -0.02em;
-  line-height: 1.04;
-  margin: 20px 0 24px;
+  line-height: 1.12;
+  margin: 12px 0 16px;
+  color: var(--ink);
 }
-.login-copy > p:last-child {
-  color: #a1a1aa;
+.login-copy > p:nth-child(3) {
+  color: var(--muted);
   font-size: 15px;
-  line-height: 1.7;
-  max-width: 360px;
+  line-height: 1.6;
+  max-width: 420px;
+  margin: 0 0 28px;
+}
+
+/* Live Telemetry Product Preview Card */
+.preview-ticket-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 22px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 460px;
+  transition: border-color 0.15s ease;
+}
+.preview-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+.preview-ticket-id {
+  font-family: "Geist Mono", "IBM Plex Mono", monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  letter-spacing: 0.04em;
+}
+.preview-p1-badge {
+  font-family: "Geist Mono", "IBM Plex Mono", monospace;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(229, 72, 77, 0.14);
+  color: #e5484d;
+  border: 1px solid rgba(229, 72, 77, 0.28);
+}
+.preview-card-body h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 10px;
+  line-height: 1.4;
+}
+.preview-telemetry-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.preview-sla-target {
+  display: inline-flex;
+  align-items: center;
+  font-family: "Geist Mono", "IBM Plex Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--ink);
+}
+.preview-sla-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+  margin-right: 6px;
+  box-shadow: 0 0 0 2px rgba(76, 195, 138, 0.25);
+}
+.preview-assignee {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+.preview-card-footer {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 .login-footer {
-  border-top: 1px solid #3f3f46;
-  color: #a1a1aa;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
   display: flex;
-  font-size: 11px;
+  font-size: 12px;
   justify-content: space-between;
-  padding-top: 16px;
+  padding-top: 20px;
 }
 .login-form-wrap {
   align-items: center;
   display: flex;
   justify-content: center;
-  padding: 48px;
-  background: var(--surface);
+  padding: clamp(24px, 5vw, 48px);
+  background: var(--canvas);
 }
-.login-form { max-width: 390px; width: 100%; color: var(--ink); }
+.login-form-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.14);
+  padding: 36px 32px;
+  width: 100%;
+  max-width: 400px;
+}
+.login-form { width: 100%; color: var(--ink); }
 .mobile-brand {
   align-items: flex-start;
   display: none;
   flex-direction: column;
   gap: 10px;
-  margin-bottom: 32px;
+  margin-bottom: 24px;
 }
 .mobile-brand strong {
   font-size: 20px;
