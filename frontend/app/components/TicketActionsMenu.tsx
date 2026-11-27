@@ -239,7 +239,7 @@ export default function TicketActionsMenu({
                   }}
                 >
                   {option.label} ({option.value})
-                  {option.value === ticket.priority ? " ✓" : ""}
+                  {option.value === ticket.priority ? " (Selected)" : ""}
                 </button>
               ))}
             {view === "type" &&
@@ -263,7 +263,7 @@ export default function TicketActionsMenu({
                   }}
                 >
                   {type.name}
-                  {type.id === ticket.ticket_type_id ? " ✓" : ""}
+                  {type.id === ticket.ticket_type_id ? " (Selected)" : ""}
                 </button>
               ))}
           </>

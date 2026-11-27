@@ -143,7 +143,7 @@ export function TicketLinksTab({ ticketId, authorization, onRefreshTicket, showT
             onClick={handleCascadeResolve}
             disabled={cascading}
           >
-            {cascading ? "Resolving..." : "✓ Resolve All Child Tickets"}
+            {cascading ? "Resolving..." : "Resolve All Child Tickets"}
           </button>
         )}
       </div>
@@ -241,7 +241,7 @@ export function TicketLinksTab({ ticketId, authorization, onRefreshTicket, showT
                 }}
                 title="Remove link"
               >
-                ✕
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><path d="m6 6 12 12M18 6 6 18" /></svg>
               </button>
             </div>
           ))}
@@ -308,7 +308,7 @@ export function TicketSolutionsTab({ ticketId, authorization, onRefreshTicket, s
         headers,
       });
       if (res.ok) {
-        showToast("success", "Solution approved and ticket closed!");
+        showToast("success", "Solution approved and ticket closed");
         await onRefreshTicket();
         await loadSolutions();
       }
@@ -383,7 +383,7 @@ export function TicketSolutionsTab({ ticketId, authorization, onRefreshTicket, s
         >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
             <span style={{ fontWeight: 600, fontSize: "0.85rem", color: sol.solution_type === "WORKAROUND" ? "#b45309" : "#15803d" }}>
-              {sol.solution_type === "WORKAROUND" ? "⚡ Known Workaround" : "✓ Permanent Fix"} · {sol.status}
+              {sol.solution_type === "WORKAROUND" ? "Known Workaround" : "Permanent Fix"} · {sol.status}
             </span>
             {sol.status !== "APPROVED" && (
               <button

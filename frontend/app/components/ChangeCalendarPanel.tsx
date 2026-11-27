@@ -304,9 +304,8 @@ export default function ChangeCalendarPanel({ tickets, onSelectTicket, authFetch
             textAlign: "center",
             fontWeight: 600,
             color: "var(--muted)",
-            fontSize: "11px",
-            textTransform: "uppercase",
-            letterSpacing: ".05em",
+            fontSize: "12px",
+            letterSpacing: "0",
             paddingBottom: 10,
             borderBottom: "1px solid var(--line)",
           }}
@@ -384,13 +383,12 @@ export default function ChangeCalendarPanel({ tickets, onSelectTicket, authFetch
                     {isToday && (
                       <span
                         style={{
-                          fontSize: "9px",
-                          fontWeight: 700,
+                          fontSize: "11px",
+                          fontWeight: 500,
                           backgroundColor: "var(--accent)",
                           color: "#ffffff",
-                          padding: "1px 5px",
+                          padding: "2px 6px",
                           borderRadius: 4,
-                          textTransform: "uppercase",
                         }}
                       >
                         Today

@@ -12,23 +12,23 @@ type ReplyComposerProps = {
 
 const CANNED_RESPONSES = [
   {
-    label: "⚡ Quick Action / Canned macro...",
+    label: "Select canned macro...",
     text: "",
   },
   {
-    label: "📋 Request Diagnostics",
+    label: "Request Diagnostics",
     text: "Hello,\n\nTo assist you further with this issue, could you please provide:\n1. Exact error message or screenshot\n2. Device name / OS version\n3. Steps to reproduce the incident\n\nThank you,\nSupport Team",
   },
   {
-    label: "💡 Propose Known Workaround",
+    label: "Propose Known Workaround",
     text: "Hello,\n\nA verified workaround is available in our Knowledge Base:\n- Please verify your network connection and flush DNS cache.\n- Restart the application and attempt sign-in.\n\nPlease reply to let us know if this resolves your issue.",
   },
   {
-    label: "✅ Ready for Closure",
+    label: "Ready for Closure",
     text: "Hello,\n\nThe solution for your request has been implemented and verified. Please confirm everything is working smoothly on your end. This ticket will automatically close once confirmed.",
   },
   {
-    label: "🔑 Password / Access Reset",
+    label: "Password / Access Reset",
     text: "Hello,\n\nYour temporary access credentials have been reset and dispatched securely. Please log in and set a new password upon your first session.\n\nBest regards,\nSVC Support Team",
   },
 ];

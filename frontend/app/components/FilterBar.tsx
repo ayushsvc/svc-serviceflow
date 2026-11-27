@@ -54,7 +54,7 @@ function MultiSelect({ label, options, selected, onChange }: {
       aria-controls={open ? panelId : undefined}
       onClick={() => { setOpen((value) => !value); setText(""); }}
     >
-      <span>{label}</span>{selected.length > 0 && <b>{selected.length}</b>}<i aria-hidden="true">⌄</i>
+      <span>{label}</span>{selected.length > 0 && <b>{selected.length}</b>}<svg className="filter-chevron" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
     </button>
     {open && <div className="filter-panel" id={panelId}>
       {options.length > 6 && <input
